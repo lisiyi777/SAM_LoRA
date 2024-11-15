@@ -11,17 +11,18 @@ import random
 import torch
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, random_split
+import argparse
 
 
 class SA1B_Dataset(torchvision.datasets.ImageFolder):
-    def __init__(self, folder, **kwargs):
+    def __init__(self, folder, preprocess_idx=None, **kwargs):
         img_folder = os.path.join(folder, "sa1b")
         super().__init__(img_folder, **kwargs)
 
         self.ws = os.path.join(folder, "preprocess")
-        if not os.path.exists(self.ws):
-            self.__preprocess()
-    
+        if preprocess_idx is not None:
+            self.__preprocess(start_index=preprocess_idx)
+
         # Use glob.glob to get a list of all files matching the pattern
         self.tgt_files = glob.glob(os.path.join(self.ws, '*.pt'))
         self.tgt_files.sort()
@@ -32,13 +33,10 @@ class SA1B_Dataset(torchvision.datasets.ImageFolder):
         self.img_files = [os.path.join(img_folder, file) for file in img_files]
 
 
-    def __preprocess(self):
-        os.mkdir(self.ws)
-
-        random.seed(1)
-        random.shuffle(self.imgs)
-        
-        for file, _ in tqdm(self.imgs[:]):
+    def __preprocess(self, start_index=0):
+        # os.mkdir(self.ws)
+        for file, _ in tqdm(self.imgs[start_index:]):
+        # for file, _ in tqdm(self.imgs[:]):
             masks = json.load(open(f'{file[:-3]}json'))['annotations'] # load json masks
 
             target = []
@@ -85,7 +83,7 @@ def collate_fn(batch):
     return torch.stack(images, dim=0), target
 
 
-def get_loaders(folder="./data", batch_size=32):
+def get_loaders(folder="..\..\SAM_LoRA\data", batch_size=32, preprocess_idx=None):
     input_transform = transforms.Compose([
         transforms.Resize((160, 256), antialias=True),
         transforms.ToTensor(),
@@ -96,7 +94,7 @@ def get_loaders(folder="./data", batch_size=32):
         transforms.Resize((160, 256), antialias=True),
     ])
 
-    dataset = SA1B_Dataset(folder, transform=input_transform, target_transform=target_transform)
+    dataset = SA1B_Dataset(folder, preprocess_idx=preprocess_idx, transform=input_transform, target_transform=target_transform)
 
     full_size = len(dataset)
     train_size = int(full_size * 0.8)
@@ -115,7 +113,13 @@ def get_loaders(folder="./data", batch_size=32):
 
 
 if __name__ == "__main__":
-    train_loader, test_loader = get_loaders(batch_size=2)
+    parser = argparse.ArgumentParser(description="SA1B Dataset Loader with Preprocessing Index")
+    parser.add_argument("--folder", type=str, default="..\..\SAM_LoRA\data", help="Base folder for the dataset")
+    parser.add_argument("--preprocess_idx", type=int, help="Start index for preprocessing")
+    args = parser.parse_args()
+
+    # train_loader, test_loader = get_loaders(folder=args.folder, batch_size=2, preprocess_idx=args.preprocess_idx)
+    train_loader, test_loader = get_loaders(folder=args.folder, batch_size=2, preprocess_idx=6694)
     images, target = next(iter(train_loader))
     print("image shape:\t", images.shape)
     print("len(target):\t", len(target))
