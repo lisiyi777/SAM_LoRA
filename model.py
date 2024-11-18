@@ -6,6 +6,8 @@ from pytorch_lightning.callbacks.finetuning import BaseFinetuning
 from .lora import *
 from segment_anything.modeling.sam import Sam
 import pytorch_lightning as pl
+from segment_anything import sam_model_registry
+from copy import deepcopy
 
 ################## Model Utils ##################
 def print_params(model):
@@ -16,16 +18,22 @@ def print_params(model):
   params = sum([np.prod(p.size()) for p in model_parameters])
   print("training params: ", params)
 
-def freeze(module):
-    BaseFinetuning.freeze(module, train_bn=True)
+def __inject_lora(model, rank=4, scale=1, linear=True, conv2d=False):
+    # TODO: inject according to the class
+    if linear:
+        for name, block in model.named_children():
+            # patch every nn.Linear in the model
+            if isinstance(block, nn.Linear):
+                block = MonkeyPatchLoRALinear(block, rank, scale)
+                setattr(model, name, block)
 
-def inject_lora(model):
-    for name, block in model.named_children():
-        # patch every nn.Linear in the model
-        if isinstance(block, nn.Linear):
-            block = MonkeyPatchLoRALinear(block, 4, 1)
-            setattr(model, name, block)
-        # TODO: freeze and inject according to the class
+    if conv2d:
+        for name, block in model.named_children():
+            # patch every nn.Conv2d in the model
+            if isinstance(block, nn.Conv2d):
+                block = MonkeyPatchLoRAConv2D(block, rank, scale)
+                setattr(model, name, block)
+
 ################## Model Utils ##################
 
 
@@ -92,8 +100,8 @@ class MyFastSAM(pl.LightningModule):
     def __init__(self, lora_rank: int, lora_scale: float, checkpoint="sam_vit_b_01ec64.pth"):
         super().__init__()
         self.device = 'cuda'
-        self.orig_sam = __orig_sam(checkpoint)
-        self.lora_sam = __lora_sam(self.orig_sam)
+        self.orig_sam = self.__orig_sam(checkpoint)
+        self.lora_sam = self.__lora_sam()
 
         self.lr = 1e-5
 
@@ -136,11 +144,39 @@ class MyFastSAM(pl.LightningModule):
         """
         return self.lora_sam(...)
 
-    def __orig_sam(checkpoint):
-        ...
+    def __orig_sam(self, checkpoint, high_res=False):
+        sam = sam_model_registry["vit_b"](checkpoint=checkpoint).to(self.device)
+        sam.image_encoder.img_size = 256
 
-    def __lora_sam(checkpoint):
-        ...
+        # TODO: hack original sam to take low res images
+        if not high_res:        
+            sam.image_encoder.img_size = 256
+            avg_pooling = nn.AvgPool2d(kernel_size=4, stride=4)
+            downsampled_tensor = avg_pooling(sam.image_encoder.pos_embed.permute(0,3,1,2)).permute(0,2,3,1)
+            sam.image_encoder.pos_embed.data = downsampled_tensor
+            sam.prompt_encoder.input_image_size = [256, 256]
+            sam.prompt_encoder.image_embedding_size = [16, 16]
+        else:
+            sam.image_encoder.img_size = 1280
+            target_embedding_size = (80,80)
+            pos_embed = sam.image_encoder.pos_embed.data
+            upscaled_pos_embed = F.interpolate(
+                pos_embed.permute(0, 3, 1, 2),
+                size=target_embedding_size,
+                mode='bilinear',
+                align_corners=False,
+            ).permute(0, 2, 3, 1)
+            sam.image_encoder.pos_embed = nn.Parameter(upscaled_pos_embed)
+            sam.prompt_encoder.input_image_size = [1280, 1280]
+            sam.prompt_encoder.image_embedding_size = [80, 80]
+        return sam
+        
+
+    def __lora_sam(self):
+        lora_sam = deepcopy(self.orig_sam)
+        BaseFinetuning.freeze(lora_sam, train_bn=True)
+        lora_sam = __inject_lora(lora_sam).to(self.device)
+        return lora_sam
 
     def configure_optimizers(self):
         lora_parameters = [param for param in self.parameters() if param.requires_grad]
