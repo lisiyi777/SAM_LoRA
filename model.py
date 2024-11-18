@@ -8,33 +8,7 @@ from segment_anything.modeling.sam import Sam
 import pytorch_lightning as pl
 from segment_anything import sam_model_registry
 from copy import deepcopy
-
-################## Model Utils ##################
-def print_params(model):
-  model_parameters = filter(lambda p: True, model.parameters())
-  params = sum([np.prod(p.size()) for p in model_parameters])
-  print("total params: ", params)
-  model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-  params = sum([np.prod(p.size()) for p in model_parameters])
-  print("training params: ", params)
-
-def __inject_lora(model, rank=4, scale=1, linear=True, conv2d=False):
-    # TODO: inject according to the class
-    if linear:
-        for name, block in model.named_children():
-            # patch every nn.Linear in the model
-            if isinstance(block, nn.Linear):
-                block = MonkeyPatchLoRALinear(block, rank, scale)
-                setattr(model, name, block)
-
-    if conv2d:
-        for name, block in model.named_children():
-            # patch every nn.Conv2d in the model
-            if isinstance(block, nn.Conv2d):
-                block = MonkeyPatchLoRAConv2D(block, rank, scale)
-                setattr(model, name, block)
-
-################## Model Utils ##################
+from typing import Any, Dict, List, Tuple
 
 
 def point_sample(all_masks, points_coords, points_label):
@@ -97,56 +71,81 @@ def box_sample(all_masks, bbox):
 
 
 class MyFastSAM(pl.LightningModule):
-    def __init__(self, lora_rank: int, lora_scale: float, checkpoint="sam_vit_b_01ec64.pth"):
+    def __init__(self, checkpoint: str = "sam_vit_b_01ec64.pth", **kwargs):
         super().__init__()
+        self.save_hyperparameters()  # Automatically saves all __init__ args, including kwargs
+
         self.device = 'cuda'
-        self.orig_sam = self.__orig_sam(checkpoint)
-        self.lora_sam = self.__lora_sam()
+        self.orig_sam = self.__orig_sam(checkpoint)  # Original SAM model
+        self.lora_sam = self.__lora_sam(**kwargs)  # LoRA-enhanced SAM model
 
-        self.lr = 1e-5
-
-    def forward(self, *args, **kwargs):
+        # Configurable hyperparameters from kwargs
+        self.lora_rank = kwargs.get("lora_rank", 4)
+        self.lora_scale = kwargs.get("lora_rank", 1)
+        self.lr = kwargs.get("lr", 1e-4)
+        self.linear = kwargs.get("linear", True)
+        self.conv2d = kwargs.get("conv2d", False)
+        
+        
+    def forward(self, batched_input, multimask_output=False):
         """
-        comments imported from original SAM code
-
-        Arguments:
-          batched_input (list(dict)): A list over input images, each a
-            dictionary with the following keys. A prompt key can be
-            excluded if it is not present.
-              'image': The image as a torch tensor in 3xHxW format,
-                already transformed for input to the model.
-              'original_size': (tuple(int, int)) The original size of
-                the image before transformation, as (H, W).
-              'point_coords': (torch.Tensor) Batched point prompts for
-                this image, with shape BxNx2. Already transformed to the
-                input frame of the model.
-              'point_labels': (torch.Tensor) Batched labels for point prompts,
-                with shape BxN.
-              'boxes': (torch.Tensor) Batched box inputs, with shape Bx4.
-                Already transformed to the input frame of the model.
-              'mask_inputs': (torch.Tensor) Batched mask inputs to the model,
-                in the form Bx1xHxW.
-          multimask_output (bool): Whether the model should predict multiple
-            disambiguating masks, or return a single mask.
+        Forward pass for LoRA-SAM.
+        
+        Args:
+            batched_input (list[dict]): A list of input dictionaries, each containing:
+                - 'image': torch.Tensor of shape [3, H, W], transformed for the model.
+                - 'original_size': tuple (H, W), original image size before transformation.
+                - 'point_coords': torch.Tensor of shape [B, N, 2], point coordinates.
+                - 'point_labels': torch.Tensor of shape [B, N], labels for the points.
+                - 'boxes': torch.Tensor of shape [B, 4], bounding box coordinates (optional).
+            multimask_output (bool): Whether to output multiple disambiguating masks.
 
         Returns:
-          (list(dict)): A list over input images, where each element is
-            as dictionary with the following keys.
-              'masks': (torch.Tensor) Batched binary mask predictions,
-                with shape BxCxHxW, where B is the number of input prompts,
-                C is determined by multimask_output, and (H, W) is the
-                original size of the image.
-              'iou_predictions': (torch.Tensor) The model's predictions
-                of mask quality, in shape BxC.
-              'low_res_logits': (torch.Tensor) Low resolution logits with
-                shape BxCxHxW, where H=W=256. Can be passed as mask input
-                to subsequent iterations of prediction.
+            list[dict]: A list of dictionaries, each containing:
+                - 'masks': torch.Tensor of shape [B, C, H, W], binary mask predictions.
+                - 'iou_predictions': torch.Tensor of shape [B, C], predicted mask IoUs.
+                - 'low_res_logits': torch.Tensor of shape [B, C, H, W], low-res logits.
         """
-        return self.lora_sam(...)
+        # Extract image features using LoRA-enhanced image encoder
+        images = torch.stack([x["image"] for x in batched_input])  # [B, 3, H, W]
+        image_features = self.lora_sam.image_encoder(images)
+
+        # Prepare prompts for the prompt encoder
+        prompts = {
+            "point_coords": [x.get("point_coords") for x in batched_input],
+            "point_labels": [x.get("point_labels") for x in batched_input],
+            "boxes": [x.get("boxes") for x in batched_input],
+            "mask_inputs": [x.get("mask_inputs") for x in batched_input],
+        }
+
+        # Encode the prompts
+        prompt_features = self.lora_sam.prompt_encoder(
+            points=prompts["point_coords"],
+            labels=prompts["point_labels"],
+            boxes=prompts["boxes"],
+            masks=prompts["mask_inputs"],
+        )
+
+        # Decode the masks using the mask decoder
+        masks, iou_predictions, low_res_logits = self.lora_sam.mask_decoder(
+            image_features=image_features,
+            image_embeddings=prompt_features,
+            multimask_output=multimask_output,
+        )
+
+        # Prepare the results in the format expected by SAM
+        results = []
+        for i, input_dict in enumerate(batched_input):
+            results.append({
+                "masks": masks[i],  # Binary mask predictions
+                "iou_predictions": iou_predictions[i],  # IoU predictions
+                "low_res_logits": low_res_logits[i],  # Low-resolution logits
+            })
+
+        return results
 
     def __orig_sam(self, checkpoint, high_res=False):
         sam = sam_model_registry["vit_b"](checkpoint=checkpoint).to(self.device)
-        sam.image_encoder.img_size = 256
 
         # TODO: hack original sam to take low res images
         if not high_res:        
@@ -154,6 +153,7 @@ class MyFastSAM(pl.LightningModule):
             avg_pooling = nn.AvgPool2d(kernel_size=4, stride=4)
             downsampled_tensor = avg_pooling(sam.image_encoder.pos_embed.permute(0,3,1,2)).permute(0,2,3,1)
             sam.image_encoder.pos_embed.data = downsampled_tensor
+
             sam.prompt_encoder.input_image_size = [256, 256]
             sam.prompt_encoder.image_embedding_size = [16, 16]
         else:
@@ -172,11 +172,56 @@ class MyFastSAM(pl.LightningModule):
         return sam
         
 
-    def __lora_sam(self):
+    def __lora_sam(self, **kwargs):
         lora_sam = deepcopy(self.orig_sam)
+        
+        # Freeze original sam
         BaseFinetuning.freeze(lora_sam, train_bn=True)
-        lora_sam = __inject_lora(lora_sam).to(self.device)
+        # for param in lora_sam.parameters():
+        #     param.requires_grad_(False)
+        
+        # Inject LoRA        
+        lora_sam = self.inject_lora(lora_sam, **kwargs)
+        lora_sam = lora_sam.to(self.device)
+
+        # Verify
+        self.check_lora_sam(self.lora_sam)
+
         return lora_sam
+
+    def check_lora_sam(self, model):
+        print("lora sam structure: \n", model)
+
+        for name, param in model.named_parameters():
+            print(f"{name}: requires_grad={param.requires_grad}")
+
+        model_parameters = filter(lambda p: True, model.parameters())
+        params = sum([np.prod(p.size()) for p in model_parameters])
+        print("total params: ", params)
+        model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+        params = sum([np.prod(p.size()) for p in model_parameters])
+        print("training params: ", params)
+
+    def inject_lora(self, model, **kwargs):
+        rank = kwargs.get("rank", 4)
+        scale = kwargs.get("scale", 1)
+        for name, block in model.named_children():  
+            if isinstance(block, nn.Linear):
+            # patch every nn.Linear in the model
+               if kwargs.get("linear"):
+                    block = MonkeyPatchLoRALinear(block, rank, scale)
+                    setattr(model, name, block)
+
+            # patch every nn.Conv2d in the model
+            if isinstance(block, nn.Conv2d):
+                if kwargs.get("conv2d"):
+                    block = MonkeyPatchLoRAConv2D(block, rank, scale)
+                    setattr(model, name, block)
+
+            #iterates over the immediate children of the model (not recursively)
+            elif isinstance(block, nn.Module):
+                self.inject_lora(block, **kwargs)
+
 
     def configure_optimizers(self):
         lora_parameters = [param for param in self.parameters() if param.requires_grad]
@@ -184,7 +229,7 @@ class MyFastSAM(pl.LightningModule):
         optimizer = torch.optim.AdamW(lora_parameters, lr=self.lr)
         return optimizer
 
-    def calc_loss(self, prediction, targets):
+    def calculate_loss(self, prediction, targets):
         ...
 
     @staticmethod
@@ -227,17 +272,60 @@ class MyFastSAM(pl.LightningModule):
         # 1b. iterative point prompt training up to 3 iteration
         # 2. box prompt training, only 1 iteration
         # TODO: 2 different ways to construct inputs
-        target_masks = []
-        target_boxes = []
-        for i in range(len(images)):
-            for _ in range(10):
-                bbox = self.random_sample_bbox(images.shape)
-                masks = self.box_sample(bbox, targets[i])
-                if any((mask == 0).all() for mask in masks):
-                    continue
-                
-            target_boxes.append(bbox)
-            target_masks.append(masks.to(self.device))
+        """
+        Constructs the batched input for the SAM model from images and target masks.
 
-        target_boxes = torch.Tensor(target_boxes).to(self.device)
-        return images, target_boxes
+        Args:
+            images (torch.Tensor): A tensor of shape [B, 3, H, W], where B is the batch size.
+            targets (list[torch.Tensor]): A list of length B, where each element is a tensor
+                                        of shape [N, H, W] (N masks per image).
+
+        Returns:
+            list[dict]: A batched input list compatible with SAM's forward pass.
+        """
+        batched_input = []
+        # (Point Prompt Training)
+        for img, target in zip(images, targets):
+            # Randomly sample one point per mask
+            N, H, W = target.shape
+            mask_idxs = torch.arange(N)
+            point_coords = []
+            point_labels = []
+
+            for idx in mask_idxs:
+                mask = target[idx]
+                # Sample a single foreground point
+                fg_points = torch.nonzero(mask)  # Coordinates of foreground pixels
+                if len(fg_points) > 0:
+                    point_coords.append(fg_points[torch.randint(len(fg_points), (1,))].squeeze(0))
+                    point_labels.append(1)  # Foreground label
+
+                # Sample a single background point
+                bg_points = torch.nonzero(mask == 0)  # Coordinates of background pixels
+                if len(bg_points) > 0:
+                    point_coords.append(bg_points[torch.randint(len(bg_points), (1,))].squeeze(0))
+                    point_labels.append(0)  # Background label
+
+            # Convert to tensors and normalize point coordinates to match the input size
+            point_coords = torch.stack(point_coords, dim=0).float() if point_coords else torch.empty(0, 2)
+            point_labels = torch.tensor(point_labels).float() if point_labels else torch.empty(0)
+
+            # Construct the input dictionary
+            input_dict = {
+                "image": img,
+                "original_size": (H, W),
+                "point_coords": point_coords.unsqueeze(0),  # [1, N, 2]
+                "point_labels": point_labels.unsqueeze(0),  # [1, N]
+            }
+
+            # Box Prompt Training (Optional)
+            if self.linear:
+                # Use bounding boxes derived from target masks
+                x, y = torch.where(target.any(0))  # Get bounding box for the mask
+                x_min, x_max = x.min(), x.max()
+                y_min, y_max = y.min(), y.max()
+                input_dict["boxes"] = torch.tensor([[x_min, y_min, x_max, y_max]]).float()
+
+            batched_input.append(input_dict)
+
+        return batched_input
