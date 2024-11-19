@@ -229,20 +229,42 @@ class MyFastSAM(pl.LightningModule):
         optimizer = torch.optim.AdamW(lora_parameters, lr=self.lr)
         return optimizer
 
-    def calculate_loss(self, prediction, targets):
-        ...
+    def calc_loss(self, prediction, targets):
+        dice_loss = self.mask_dice_loss(prediction, targets)
+        focal_loss = self.mask_focal_loss(prediction, targets)
+        iou_loss = self.iou_token_loss(prediction, targets)
+        return dice_loss + focal_loss + iou_loss
 
     @staticmethod
-    def mask_dice_loss(prediction, targets):
-        ...
+    def mask_dice_loss(prediction, targets, epsilon=1):
+        prediction = torch.sigmoid(prediction)
+        intersection = (prediction * targets).sum()
+        cardinality = prediction.sum() + targets.sum()
+        dice_score = (2. * intersection + epsilon) / (cardinality + epsilon)
+        dice_loss = 1 - dice_score
+        return dice_loss
 
     @staticmethod
     def mask_focal_loss(prediction, targets):
-        ...
-
+        alpha=.25
+        gamma=1.8
+        alpha = torch.tensor([alpha, 1-alpha])
+        BCE_loss = F.binary_cross_entropy_with_logits(prediction, targets, reduction='none')
+        at = alpha.gather(0, targets.data.view(-1))
+        pt = torch.exp(-BCE_loss)
+        focal_loss = at*(1-pt)**gamma * BCE_loss
+        return focal_loss
+    
     @staticmethod
     def iou_token_loss(iou_prediction, prediction, targets):
-        ...
+        mask_pred = (prediction >= 0.5).float()
+        intersection = torch.sum(torch.mul(mask_pred, targets), dim=(-2, -1))
+        union = torch.sum(mask_pred, dim=(-2, -1)) + torch.sum(targets, dim=(-2, -1)) - intersection
+        epsilon = 1e-7
+        batch_iou = intersection / (union + epsilon)
+        batch_iou = batch_iou.unsqueeze(1)
+        iou_loss = F.mse_loss(iou_prediction, batch_iou, reduction='mean')
+        return iou_loss
 
     def training_step(self, batch, batch_idx):
         images, targets = batch
