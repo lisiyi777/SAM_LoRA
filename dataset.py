@@ -83,7 +83,7 @@ def collate_fn(batch):
     return torch.stack(images, dim=0), target
 
 
-def get_loaders(folder="..\..\SAM_LoRA\data", batch_size=32, preprocess_idx=None):
+def get_loaders(data_dir="..\..\SAM_LoRA\data", batch_size=32, preprocess_idx=None, use_small_subset=False):
     input_transform = transforms.Compose([
         transforms.Resize((160, 256), antialias=True),
         transforms.ToTensor(),
@@ -94,8 +94,13 @@ def get_loaders(folder="..\..\SAM_LoRA\data", batch_size=32, preprocess_idx=None
         transforms.Resize((160, 256), antialias=True),
     ])
 
-    dataset = SA1B_Dataset(folder, preprocess_idx=preprocess_idx, transform=input_transform, target_transform=target_transform)
-
+    dataset = SA1B_Dataset(data_dir, preprocess_idx=preprocess_idx, transform=input_transform, target_transform=target_transform)
+    
+    subset_size=10
+    if use_small_subset:
+        indices = torch.randperm(len(dataset))[:subset_size]
+        dataset = torch.utils.data.Subset(dataset, indices)
+    print("dataset size:\t", len(dataset))
     full_size = len(dataset)
     train_size = int(full_size * 0.8)
     test_size = full_size - train_size
