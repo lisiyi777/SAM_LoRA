@@ -1,10 +1,10 @@
 import os
 import argparse
-from model import MyFastSAM
+from lora_sam import MyFastSAM
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from dataset import get_loaders
+from lora_sam.dataset import get_loaders
 
 def train(args):
     # Set random seed for reproducibility
@@ -35,7 +35,8 @@ def train(args):
     # Prepare Dataloaders
     train_loader, val_loader = get_loaders(
         data_dir=args.data_dir,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        use_small_subset=True
     )
 
     # Initialize the model
@@ -45,17 +46,18 @@ def train(args):
         lr=args.lr,  # Pass learning rate explicitly
         linear=args.linear,
         conv2d=args.conv2d,
+        convtrans2d = args.convtrans2d,
         num_epochs=args.num_epochs
     )
 
     # Trainer
     trainer = Trainer(
         max_epochs=args.num_epochs,
-        accelerator="gpu",  # Automatically uses GPU if available
+        accelerator="mps",  # Automatically uses GPU if available
         devices=1,
         logger=logger,
         callbacks=[checkpoint_callback, early_stopping_callback],
-        log_every_n_steps=50,
+        log_every_n_steps=1,
     )
 
     # Start training
@@ -65,13 +67,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="./logs")
     parser.add_argument("--linear", type=bool, default=True)
-    parser.add_argument("--conv2d", type=bool, default=False)
+    parser.add_argument("--conv2d", type=bool, default=True)
+    parser.add_argument("--convtrans2d", type=bool, default=True)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--scale", type=float, default=1)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--num_epochs", type=int, default=10)
-    parser.add_argument("--data_dir", type=str, default="./data/sa1b")
+    parser.add_argument("--num_epochs", type=int, default=3)
+    parser.add_argument("--data_dir", type=str, default="./data")
 
     args = parser.parse_args()
 
