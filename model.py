@@ -71,11 +71,10 @@ def box_sample(all_masks, bbox):
 
 
 class MyFastSAM(pl.LightningModule):
-    def __init__(self, checkpoint: str = "sam_vit_b_01ec64.pth", **kwargs):
+    def __init__(self, checkpoint: str = "checkpoints/sam_vit_b_01ec64.pth", **kwargs):
         super().__init__()
         self.save_hyperparameters()  # Automatically saves all __init__ args, including kwargs
 
-        self.device = 'cuda'
         self.orig_sam = self.__orig_sam(checkpoint)  # Original SAM model
         self.lora_sam = self.__lora_sam(**kwargs)  # LoRA-enhanced SAM model
 
@@ -107,9 +106,9 @@ class MyFastSAM(pl.LightningModule):
                 - 'low_res_logits': torch.Tensor of shape [B, C, H, W], low-res logits.
         """
         # Extract image features using LoRA-enhanced image encoder
-        images = torch.stack([x["image"] for x in batched_input])  # [B, 3, H, W]
+        images = torch.stack([self.lora_sam.preprocess(x["image"]) for x in batched_input])  # [B, 3, H, W]
         image_features = self.lora_sam.image_encoder(images)
-
+        # print('batched_input:' , batched_input[0])
         # Prepare prompts for the prompt encoder
         prompts = {
             "point_coords": [x.get("point_coords") for x in batched_input],
@@ -121,7 +120,6 @@ class MyFastSAM(pl.LightningModule):
         # Encode the prompts
         prompt_features = self.lora_sam.prompt_encoder(
             points=prompts["point_coords"],
-            labels=prompts["point_labels"],
             boxes=prompts["boxes"],
             masks=prompts["mask_inputs"],
         )
@@ -185,7 +183,7 @@ class MyFastSAM(pl.LightningModule):
         lora_sam = lora_sam.to(self.device)
 
         # Verify
-        self.check_lora_sam(self.lora_sam)
+        # self.check_lora_sam(lora_sam)
 
         return lora_sam
 
@@ -211,17 +209,21 @@ class MyFastSAM(pl.LightningModule):
                if kwargs.get("linear"):
                     block = MonkeyPatchLoRALinear(block, rank, scale)
                     setattr(model, name, block)
-
             # patch every nn.Conv2d in the model
-            if isinstance(block, nn.Conv2d):
+            elif isinstance(block, nn.Conv2d):
                 if kwargs.get("conv2d"):
                     block = MonkeyPatchLoRAConv2D(block, rank, scale)
                     setattr(model, name, block)
-
+            # patch every nn.ConvTranspose2d in the model
+            elif isinstance(block, nn.ConvTranspose2d):
+                if kwargs.get("convtrans2d"):
+                    block = MonkeyPatchLoRAConvTranspose2D(block, rank, scale)
+                    setattr(model, name, block)
             #iterates over the immediate children of the model (not recursively)
             elif isinstance(block, nn.Module):
                 self.inject_lora(block, **kwargs)
-
+        return model
+            
 
     def configure_optimizers(self):
         lora_parameters = [param for param in self.parameters() if param.requires_grad]
@@ -266,6 +268,7 @@ class MyFastSAM(pl.LightningModule):
         iou_loss = F.mse_loss(iou_prediction, batch_iou, reduction='mean')
         return iou_loss
 
+
     def training_step(self, batch, batch_idx):
         images, targets = batch
         images = images.to(self.device)
@@ -281,7 +284,7 @@ class MyFastSAM(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         images, targets = batch
         images = images.to(self.device)
-        target = [mask.to(self.device) for mask in target]
+        targets = [mask.to(self.device) for mask in targets]
         batched_input = self.construct_batched_input(images, targets)
         predictions = self.forward(batched_input)
         loss = self.calc_loss(predictions, targets)
@@ -351,3 +354,5 @@ class MyFastSAM(pl.LightningModule):
             batched_input.append(input_dict)
 
         return batched_input
+
+
