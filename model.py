@@ -84,7 +84,7 @@ class MyFastSAM(pl.LightningModule):
         self.lr = kwargs.get("lr", 1e-4)
         self.linear = kwargs.get("linear", True)
         self.conv2d = kwargs.get("conv2d", False)
-        
+        print('self.device:', self.device)  
         
     def forward(self, batched_input, multimask_output=False):
         """
@@ -106,38 +106,44 @@ class MyFastSAM(pl.LightningModule):
                 - 'low_res_logits': torch.Tensor of shape [B, C, H, W], low-res logits.
         """
         # Extract image features using LoRA-enhanced image encoder
+        # device = next(self.parameters()).device
         images = torch.stack([self.lora_sam.preprocess(x["image"]) for x in batched_input])  # [B, 3, H, W]
+        H, W = images.shape[-2:]
         image_features = self.lora_sam.image_encoder(images)
         # print('batched_input:' , batched_input[0])
         # Prepare prompts for the prompt encoder
-        prompts = {
-            "point_coords": [x.get("point_coords") for x in batched_input],
-            "point_labels": [x.get("point_labels") for x in batched_input],
-            "boxes": [x.get("boxes") for x in batched_input],
-            "mask_inputs": [x.get("mask_inputs") for x in batched_input],
-        }
-
-        # Encode the prompts
-        prompt_features = self.lora_sam.prompt_encoder(
-            points=prompts["point_coords"],
-            boxes=prompts["boxes"],
-            masks=prompts["mask_inputs"],
-        )
-
-        # Decode the masks using the mask decoder
-        masks, iou_predictions, low_res_logits = self.lora_sam.mask_decoder(
-            image_features=image_features,
-            image_embeddings=prompt_features,
-            multimask_output=multimask_output,
-        )
-
-        # Prepare the results in the format expected by SAM
         results = []
-        for i, input_dict in enumerate(batched_input):
+        for image_record, img_embedding in zip(batched_input, image_features):
+
+            points = (image_record["point_coords"], image_record["point_labels"])
+            # Encode the prompts
+            sparse_embeddings, dense_embeddings = self.lora_sam.prompt_encoder(
+                points=points,
+                boxes=image_record.get("boxes", None),
+                masks=image_record.get("mask_inputs", None),
+            )
+
+            # Decode the masks using the mask decoder
+            low_res_masks, iou_predictions = self.lora_sam.mask_decoder(
+                image_embeddings=img_embedding.unsqueeze(0),
+                image_pe=self.lora_sam.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=multimask_output,
+            )
+            masks = F.interpolate(
+                low_res_masks,
+                (H, W),
+                mode="bilinear",
+                align_corners=False,
+            )
+            masks = masks > 0.0
+            # Prepare the results in the format expected by SAM
+            
             results.append({
-                "masks": masks[i],  # Binary mask predictions
-                "iou_predictions": iou_predictions[i],  # IoU predictions
-                "low_res_logits": low_res_logits[i],  # Low-resolution logits
+                "masks": masks,  # Binary mask predictions
+                "iou_predictions": iou_predictions,  # IoU predictions
+                "low_res_logits": low_res_masks,  # Low-resolution logits
             })
 
         return results
@@ -232,9 +238,15 @@ class MyFastSAM(pl.LightningModule):
         return optimizer
 
     def calc_loss(self, prediction, targets):
-        dice_loss = self.mask_dice_loss(prediction, targets)
-        focal_loss = self.mask_focal_loss(prediction, targets)
-        iou_loss = self.iou_token_loss(prediction, targets)
+        iou_preds = [x["iou_predictions"] for x in prediction]
+        predictions = [x["masks"] for x in prediction]
+        focal_loss = torch.tensor(0., device=self.device)
+        dice_loss = torch.tensor(0., device=self.device)
+        iou_loss = torch.tensor(0., device=self.device)
+        for pred, target, iou_pred in zip(predictions, targets, iou_preds):
+            dice_loss += 0.1 * self.mask_dice_loss(pred, target)
+            focal_loss += self.mask_focal_loss(pred, target)
+            iou_loss += self.iou_token_loss(iou_pred,pred, target)
         return dice_loss + focal_loss + iou_loss
 
     @staticmethod
@@ -244,7 +256,7 @@ class MyFastSAM(pl.LightningModule):
         cardinality = prediction.sum() + targets.sum()
         dice_score = (2. * intersection + epsilon) / (cardinality + epsilon)
         dice_loss = 1 - dice_score
-        return dice_loss
+        return torch.mean(dice_loss)
 
     @staticmethod
     def mask_focal_loss(prediction, targets):
