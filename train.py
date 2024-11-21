@@ -1,10 +1,10 @@
 import os
 import argparse
-from lora_sam import MyFastSAM
+from model import MyFastSAM
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from lora_sam.dataset import get_loaders
+from dataset import get_loaders
 
 def train(args):
     # Set random seed for reproducibility
@@ -53,7 +53,7 @@ def train(args):
     # Trainer
     trainer = Trainer(
         max_epochs=args.num_epochs,
-        accelerator="mps",  # Automatically uses GPU if available
+        accelerator="gpu",  # Automatically uses GPU if available
         devices=1,
         logger=logger,
         callbacks=[checkpoint_callback, early_stopping_callback],
@@ -71,7 +71,7 @@ if __name__ == "__main__":
     parser.add_argument("--convtrans2d", type=bool, default=True)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--scale", type=float, default=1)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--data_dir", type=str, default="./data")

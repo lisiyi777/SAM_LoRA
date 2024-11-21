@@ -119,13 +119,14 @@ def get_loaders(data_dir="..\..\SAM_LoRA\data", batch_size=32, preprocess_idx=No
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SA1B Dataset Loader with Preprocessing Index")
-    parser.add_argument("--folder", type=str, default="..\..\SAM_LoRA\data", help="Base folder for the dataset")
+    parser.add_argument("--folder", type=str, default=".\data", help="Base folder for the dataset")
     parser.add_argument("--preprocess_idx", type=int, help="Start index for preprocessing")
     args = parser.parse_args()
 
-    # train_loader, test_loader = get_loaders(folder=args.folder, batch_size=2, preprocess_idx=args.preprocess_idx)
-    train_loader, test_loader = get_loaders(folder=args.folder, batch_size=2, preprocess_idx=6694)
+    # train_loader, test_loader = get_loaders(data_dir=args.folder, batch_size=2, preprocess_idx=args.preprocess_idx)
+    # train_loader, test_loader = get_loaders(data_dir=args.folder, batch_size=2, preprocess_idx=6694)
+    train_loader, test_loader = get_loaders(data_dir=args.folder, batch_size=2)
     images, target = next(iter(train_loader))
     print("image shape:\t", images.shape)
     print("len(target):\t", len(target))
-    print("target[0].shape:\t", target[0].shape)
+    print("target[1].shape:\t", target[0].shape)
