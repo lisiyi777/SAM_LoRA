@@ -132,20 +132,14 @@ class MyFastSAM(pl.LightningModule):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=multimask_output,
             )
-            # TODO: process mask
             masks = self.lora_sam.postprocess_masks(
                 low_res_masks,
                 input_size=image_record["image"].shape[-2:],
                 original_size=image_record["original_size"],
             )
-            # masks = F.interpolate(
-            #     low_res_masks,
-            #     image_record["original_size"],
-            #     mode="bilinear",
-            #     align_corners=False,
-            # )
-            # TODO: if not self.training:
-            masks = masks > 0.0
+            # TODO: 0.0?
+            if not self.training:
+                masks = masks > 0.0
 
             # Prepare the results in the format expected by SAM
             results.append({
@@ -192,7 +186,7 @@ class MyFastSAM(pl.LightningModule):
         # for param in lora_sam.parameters():
         #     param.requires_grad_(False)
         
-        # Inject LoRA        
+        # Inject LoRA
         lora_sam = self.inject_lora(lora_sam, **kwargs)
 
         # Verify
@@ -408,6 +402,11 @@ def generate_box_prompts(target, max_boxes, device):
         y_min, y_max = y.min().item(), y.max().item()
         boxes.append([x_min, y_min, x_max, y_max])
         updated_targets.append(mask)
+    # Pad results if there are fewer than max_boxes masks
+    while len(boxes) < max_boxes:
+        # Add an empty box and an empty mask
+        boxes.append([0, 0, 0, 0])
+        updated_targets.append(torch.zeros_like(target[0]))
 
     boxes = torch.tensor(boxes, dtype=torch.float, device=device)
     updated_targets = torch.stack(updated_targets, dim=0).to(device)

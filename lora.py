@@ -151,7 +151,7 @@ class LoRAConvTranspose2DLayer(nn.Module):
             raise ValueError(
                 f"LoRA rank {rank} must be less or equal than {min(in_channels, out_channels)}"
             )
-
+        # TODO: down & up order?
         self.down = nn.Conv2d(in_channels, rank, 1, 1, 0, bias=False)
         self.up = nn.ConvTranspose2d(rank, out_channels, kernel_size, stride=stride, padding=padding, output_padding = output_padding, bias=False)
 
