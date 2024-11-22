@@ -355,23 +355,26 @@ class MyFastSAM(pl.LightningModule):
     def point_sample(self,all_masks, points_coords, points_label):
         # all_masks: [N, H, W], one image, N masks
         # points_coords: (N, 2)
-        # points_label: (N, 1), 1 for foreground, 0 for background
+        # points_label: (N,), 1 for foreground, 0 for background
         # return: sampled_masks: [3, H, W], masks order from big to small
         # you can modify the signature of this function
 
-        valid_masks = all_masks
-        # valid_masks = []
-        # for mask in all_masks:
-        #     x = points_coords[:,0]
-        #     y = points_coords[:,1]
-        #     valid_points = mask[y, x]
-        #     # TODO: correct this
-        #     if torch.all(valid_points):
-        #         valid_masks.append(mask)
+        # valid_masks = all_masks
+        valid_masks = []
+        for mask in all_masks:
+            x = points_coords[:,0]
+            y = points_coords[:,1]
+            on_mask = mask[y, x].bool()  # Check if points are on the mask
 
-        # # sorting the masks based on the total number of non-zero pixels
-        # valid_masks.sort(key=lambda m: m.sum(), reverse=True)
-        # valid_masks = torch.stack(valid_masks)
+            # Validate points using the corrected logic
+            valid_points = (on_mask & points_label==1) | (~on_mask & points_label==0)
+            if torch.all(valid_points):
+                valid_masks.append(mask)
+
+        # sorting the masks based on the total number of non-zero pixels
+        if len(valid_masks) > 0:
+            valid_masks.sort(key=lambda m: m.sum(), reverse=True)
+            valid_masks = torch.stack(valid_masks)
 
         sampled_masks = torch.zeros((3, all_masks.shape[1], all_masks.shape[2]))
         if len(valid_masks) >= 3:
