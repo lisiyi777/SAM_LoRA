@@ -43,7 +43,7 @@ def train(args):
     model = MyFastSAM(
         lora_rank=args.rank,
         lora_scale=args.scale,
-        lr=args.lr,  # Pass learning rate explicitly
+        lr=args.lr,
         linear=args.linear,
         conv2d=args.conv2d,
         convtrans2d = args.convtrans2d,
@@ -71,9 +71,9 @@ if __name__ == "__main__":
     parser.add_argument("--convtrans2d", type=bool, default=False)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--scale", type=float, default=1)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--num_epochs", type=int, default=3)
+    parser.add_argument("--num_epochs", type=int, default=8)
     parser.add_argument("--data_dir", type=str, default="./data")
 
     args = parser.parse_args()

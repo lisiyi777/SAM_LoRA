@@ -11,64 +11,6 @@ from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 import random
 
-def point_sample(all_masks, points_coords, points_label):
-    # all_masks: [N, H, W], one image, N masks
-    # points_coords: (N, 2)
-    # points_label: (N, 1), 1 for foreground, 0 for background
-    # return: sampled_masks: [3, H, W], masks order from big to small
-    # you can modify the signature of this function
-
-    # TODO: what does points_label do???
-    valid_masks = []
-    for mask in all_masks:
-        x = points_coords[:,0]
-        y = points_coords[:,1]
-        valid_points = mask[y][x]
-        if torch.all(valid_points):
-            valid_masks.append(mask)
-
-    # sorting the masks based on the total number of non-zero pixels
-    valid_masks.sort(key=lambda m: m.sum(), reverse=True)
-    valid_masks = torch.stack(valid_masks)
-
-    sampled_masks = torch.zeros((3, all_masks.shape[1], all_masks.shape[2]))
-    if len(valid_masks) >= 3:
-        sampled_masks = valid_masks[:3]
-    else:
-        sampled_masks[:len(valid_masks)] = valid_masks
-    return sampled_masks
-
-def box_sample(all_masks, bbox):
-    # all_masks: [N, H, W], one image, N masks
-    # bbox: (xxyy)
-    # return: sampled_masks: [3, H, W], masks order from big to small
-    # you can modify the signature of this function
-
-    # Calculate IoUs
-    bbox_mask = torch.zeros_like(all_masks, dtype=int)
-    bbox_mask[:,bbox[1]:bbox[3], bbox[0]:bbox[2]] = 1
-    intersections = torch.logical_and(all_masks, bbox_mask).sum(dim=(1, 2))
-    unions = torch.logical_or(all_masks, bbox_mask).sum(dim=(1, 2))
-    ious = intersections.float() / unions.float()   # (N,)
-    
-    # TODO: Find the mask indices with the highest IoU and smaller size than bbox?
-    sorted_mask_ids = torch.argsort(ious, descending=True)
-    selected_masks = []
-    bbox_area = (bbox[3] - bbox[1]) * (bbox[2] - bbox[0])
-    for mask_id in sorted_mask_ids:
-        mask = all_masks[mask_id]
-        if mask.sum().item() <= bbox_area:
-            selected_masks.append(mask)
-        if len(selected_masks) == 3:
-            break
-
-    while len(selected_masks) < 3:
-        selected_masks.append(torch.zeros_like(all_masks[0]))
-
-    # Stack and return the selected masks
-    sampled_masks = torch.stack(selected_masks)
-    return sampled_masks
-
 
 class MyFastSAM(pl.LightningModule):
     def __init__(self, checkpoint: str = "checkpoints/sam_vit_b_01ec64.pth", **kwargs):
@@ -285,7 +227,6 @@ class MyFastSAM(pl.LightningModule):
         iou_loss = F.mse_loss(iou_prediction, batch_iou, reduction='mean')
         return iou_loss
 
-
     def training_step(self, batch, batch_idx):
         images, targets = batch
         batched_input, batched_targets = self.construct_batched_input(images, targets)
@@ -362,7 +303,7 @@ class MyFastSAM(pl.LightningModule):
 
             # Box Prompt Training
             if prompt == 'box':
-                boxes, updated_target = generate_box_prompts(target, max_boxes=max_boxes, device=device)
+                boxes, updated_target = self.generate_box_prompts(target, max_boxes=max_boxes, device=device)
                 boxes[:, 0::2] /= W
                 boxes[:, 1::2] /= H
                 input_dict = {
@@ -371,7 +312,6 @@ class MyFastSAM(pl.LightningModule):
                     "boxes": boxes,
                 }
 
-                batched_input.append(input_dict)
                 updated_targets.append(updated_target)
 
             batched_input.append(input_dict)
@@ -385,29 +325,88 @@ class MyFastSAM(pl.LightningModule):
 
         return batched_input, updated_targets
 
-def generate_box_prompts(target, max_boxes, device):
-    # Step 1: 过滤掉空白掩码
-    non_empty_masks = [mask for mask in target if mask.sum() > 0]
+    def generate_box_prompts(self,target, max_boxes, device):
+        # Step 1: 过滤掉空白掩码
+        non_empty_masks = [mask for mask in target if mask.sum() > 0]
 
-    # Step 2: 随机选择部分掩码
-    num_samples = min(len(non_empty_masks), max_boxes)
-    selected_masks = random.sample(non_empty_masks, num_samples)
+        # Step 2: 随机选择部分掩码
+        num_samples = min(len(non_empty_masks), max_boxes)
+        selected_masks = random.sample(non_empty_masks, num_samples)
 
-    # Step 3: 为每个掩码生成边框
-    boxes = []
-    updated_targets = []
-    for mask in selected_masks:
-        x, y = torch.where(mask > 0)
-        x_min, x_max = x.min().item(), x.max().item()
-        y_min, y_max = y.min().item(), y.max().item()
-        boxes.append([x_min, y_min, x_max, y_max])
-        updated_targets.append(mask)
-    # Pad results if there are fewer than max_boxes masks
-    while len(boxes) < max_boxes:
-        # Add an empty box and an empty mask
-        boxes.append([0, 0, 0, 0])
-        updated_targets.append(torch.zeros_like(target[0]))
+        # Step 3: 为每个掩码生成边框
+        boxes = []
+        updated_targets = []
+        for mask in selected_masks:
+            x, y = torch.where(mask > 0)
+            x_min, x_max = x.min().item(), x.max().item()
+            y_min, y_max = y.min().item(), y.max().item()
+            boxes.append([x_min, y_min, x_max, y_max])
+            updated_targets.append(mask)
+        # Pad results if there are fewer than max_boxes masks
+        while len(boxes) < max_boxes:
+            # Add an empty box and an empty mask
+            boxes.append([0, 0, 0, 0])
+            updated_targets.append(torch.zeros_like(target[0]))
 
-    boxes = torch.tensor(boxes, dtype=torch.float, device=device)
-    updated_targets = torch.stack(updated_targets, dim=0).to(device)
-    return boxes, updated_targets
+        boxes = torch.tensor(boxes, dtype=torch.float, device=device)
+        updated_targets = torch.stack(updated_targets, dim=0).to(device)
+        return boxes, updated_targets
+
+    def point_sample(self,all_masks, points_coords, points_label):
+        # all_masks: [N, H, W], one image, N masks
+        # points_coords: (N, 2)
+        # points_label: (N, 1), 1 for foreground, 0 for background
+        # return: sampled_masks: [3, H, W], masks order from big to small
+        # you can modify the signature of this function
+
+        valid_masks = all_masks
+        # valid_masks = []
+        # for mask in all_masks:
+        #     x = points_coords[:,0]
+        #     y = points_coords[:,1]
+        #     valid_points = mask[y, x]
+        #     # TODO: correct this
+        #     if torch.all(valid_points):
+        #         valid_masks.append(mask)
+
+        # # sorting the masks based on the total number of non-zero pixels
+        # valid_masks.sort(key=lambda m: m.sum(), reverse=True)
+        # valid_masks = torch.stack(valid_masks)
+
+        sampled_masks = torch.zeros((3, all_masks.shape[1], all_masks.shape[2]))
+        if len(valid_masks) >= 3:
+            sampled_masks = valid_masks[:3]
+        else:
+            sampled_masks[:len(valid_masks)] = valid_masks
+        return sampled_masks
+
+    def box_sample(self,all_masks, bbox):
+        # all_masks: [N, H, W], one image, N masks
+        # bbox: (xxyy)
+        # return: sampled_masks: [3, H, W], masks order from big to small
+        # you can modify the signature of this function
+
+        # Calculate IoUs
+        bbox_mask = torch.zeros_like(all_masks, dtype=int)
+        bbox_mask[:,bbox[1]:bbox[3], bbox[0]:bbox[2]] = 1
+        intersections = torch.logical_and(all_masks, bbox_mask).sum(dim=(1, 2))
+        unions = torch.logical_or(all_masks, bbox_mask).sum(dim=(1, 2))
+        ious = intersections.float() / unions.float()   # (N,)
+        
+        # TODO: Find the mask indices with the highest IoU and smaller size than bbox?
+        sorted_mask_ids = torch.argsort(ious, descending=True)
+        selected_masks = []
+        bbox_area = (bbox[3] - bbox[1]) * (bbox[2] - bbox[0])
+        for mask_id in sorted_mask_ids:
+            mask = all_masks[mask_id]
+            if mask.sum().item() <= bbox_area:
+                selected_masks.append(mask)
+            if len(selected_masks) == 3:
+                break
+
+        while len(selected_masks) < 3:
+            selected_masks.append(torch.zeros_like(all_masks[0]))
+
+        # Stack and return the selected masks
+        sampled_masks = torch.stack(selected_masks)
+        return sampled_masks
