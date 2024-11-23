@@ -82,6 +82,7 @@ class MyFastSAM(pl.LightningModule):
             # TODO: 0.0?
             if not self.training:
                 masks = masks > 0.0
+            masks = masks > 0.0
 
             # Prepare the results in the format expected by SAM
             results.append({
@@ -352,6 +353,43 @@ class MyFastSAM(pl.LightningModule):
         updated_targets = torch.stack(updated_targets, dim=0).to(device)
         return boxes, updated_targets
 
+    # def point_sample(self,all_masks, points_coords, points_label):
+    #     # all_masks: [N, H, W], one image, N masks
+    #     # points_coords: (N, 2)
+    #     # points_label: (N,), 1 for foreground, 0 for background
+    #     # return: sampled_masks: [3, H, W], masks order from big to small
+    #     # you can modify the signature of this function
+
+    #     valid_masks = []
+
+    #     for mask in all_masks:
+    #         x = points_coords[:, 0].long()  # Ensure integer indexing
+    #         y = points_coords[:, 1].long()  # Ensure integer indexing
+
+    #         # Clamp x, y to valid ranges
+    #         x = torch.clamp(x, 0, mask.shape[1] - 1)
+    #         y = torch.clamp(y, 0, mask.shape[0] - 1)
+
+    #         on_mask = mask[y, x].bool()  # Check if, po，ints are on the mask
+    #         # Validate points using the corrected logic
+    #         valid_points = (on_mask & points_label==0) | (~on_mask & points_label==1)
+    #         if torch.all(valid_points):
+    #             valid_masks.append(mask)
+
+    #     # sorting the masks based on the total number of non-zero pixels
+    #     if len(valid_masks) > 0:
+    #         valid_masks.sort(key=lambda m: m.sum(), reverse=True)
+    #         valid_masks = torch.stack(valid_masks)
+    #     else:
+    #         valid_masks = torch.zeros((3, all_masks.shape[1], all_masks.shape[2]))
+
+    #     sampled_masks = torch.zeros((3, all_masks.shape[1], all_masks.shape[2]))
+    #     if len(valid_masks) >= 3:
+    #         sampled_masks = valid_masks[:3]
+    #     else:
+    #         sampled_masks[:len(valid_masks)] = valid_masks
+    #     return sampled_masks
+
     def point_sample(self,all_masks, points_coords, points_label):
         # all_masks: [N, H, W], one image, N masks
         # points_coords: (N, 2)
@@ -379,15 +417,17 @@ class MyFastSAM(pl.LightningModule):
         sampled_masks = torch.zeros((3, all_masks.shape[1], all_masks.shape[2]))
         if len(valid_masks) >= 3:
             sampled_masks = valid_masks[:3]
-        else:
+        elif len(valid_masks) > 0:
             sampled_masks[:len(valid_masks)] = valid_masks
         return sampled_masks
-
+        
     def box_sample(self,all_masks, bbox):
         # all_masks: [N, H, W], one image, N masks
         # bbox: (xxyy)
         # return: sampled_masks: [3, H, W], masks order from big to small
         # you can modify the signature of this function
+
+        print(all_masks.shape)
 
         # Calculate IoUs
         bbox_mask = torch.zeros_like(all_masks, dtype=int)
@@ -396,14 +436,16 @@ class MyFastSAM(pl.LightningModule):
         unions = torch.logical_or(all_masks, bbox_mask).sum(dim=(1, 2))
         ious = intersections.float() / unions.float()   # (N,)
         
-        # TODO: Find the mask indices with the highest IoU and smaller size than bbox?
+        # Find the mask indices with the highest IoU
         sorted_mask_ids = torch.argsort(ious, descending=True)
         selected_masks = []
-        bbox_area = (bbox[3] - bbox[1]) * (bbox[2] - bbox[0])
         for mask_id in sorted_mask_ids:
             mask = all_masks[mask_id]
-            if mask.sum().item() <= bbox_area:
-                selected_masks.append(mask)
+            selected_masks.append(mask)
+            if mask.sum() == 0:
+                print("@@@@@@@@@@@@@")
+            else:
+                print(mask.sum())
             if len(selected_masks) == 3:
                 break
 
