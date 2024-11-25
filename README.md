@@ -1,5 +1,6 @@
 ncut visualization:
 在MyFastSAM的init中最后加上这段：
+
         from segment_anything.modeling.image_encoder import (
             window_partition,
             window_unpartition,
@@ -28,6 +29,7 @@ ncut visualization:
         setattr(self.lora_sam.image_encoder.blocks[0].__class__, "forward", new_block_forward)
 
 forward改成：
+
     def forward(self, batched_input):
         x = torch.stack([self.lora_sam.preprocess(x) for x in batched_input])
         out = self.lora_sam.image_encoder(x)
