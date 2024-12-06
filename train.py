@@ -36,8 +36,9 @@ def train(args):
     train_loader, val_loader = get_loaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
-        use_small_subset=False
+        use_small_subset=True
     )
+    print(len(train_loader))
 
     # Initialize the model
     model = MyFastSAM(
@@ -53,10 +54,10 @@ def train(args):
     # Trainer
     trainer = Trainer(
         max_epochs=args.num_epochs,
-        accelerator="gpu",  # Automatically uses GPU if available
+        accelerator="gpu",  
         devices=1,
         logger=logger,
-        callbacks=[checkpoint_callback, early_stopping_callback],
+        callbacks=[checkpoint_callback],
         log_every_n_steps=1,
     )
 
@@ -67,12 +68,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="./logs")
     parser.add_argument("--linear", type=bool, default=True)
-    parser.add_argument("--conv2d", type=bool, default=True)
+    parser.add_argument("--conv2d", type=bool, default=False)
     parser.add_argument("--convtrans2d", type=bool, default=False)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--scale", type=float, default=1)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_epochs", type=int, default=8)
     parser.add_argument("--data_dir", type=str, default="./data")
 

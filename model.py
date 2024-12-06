@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from torch.optim.lr_scheduler import StepLR
 from pytorch_lightning.callbacks.finetuning import BaseFinetuning
 from lora import *
 from segment_anything.modeling.sam import Sam
@@ -10,6 +11,8 @@ from segment_anything import sam_model_registry
 from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 import random
+from inference import show_box, show_mask, save_fig
+import matplotlib.pyplot as plt
 
 
 class MyFastSAM(pl.LightningModule):
@@ -51,7 +54,6 @@ class MyFastSAM(pl.LightningModule):
         images = torch.stack([self.lora_sam.preprocess(x["image"]) for x in batched_input])  # [B, 3, H, W]
 
         image_features = self.lora_sam.image_encoder(images)
-
         results = []
         for image_record, img_embedding in zip(batched_input, image_features):
 
@@ -79,10 +81,8 @@ class MyFastSAM(pl.LightningModule):
                 input_size=image_record["image"].shape[-2:],
                 original_size=image_record["original_size"],
             )
-            # TODO: 0.0?
             if not self.training:
                 masks = masks > 0.0
-            masks = masks > 0.0
 
             # Prepare the results in the format expected by SAM
             results.append({
@@ -123,25 +123,24 @@ class MyFastSAM(pl.LightningModule):
 
     def __lora_sam(self, orig_sam, **kwargs):
         lora_sam = deepcopy(orig_sam)
-        
         # Freeze original sam
         BaseFinetuning.freeze(lora_sam, train_bn=True)
-        # for param in lora_sam.parameters():
-        #     param.requires_grad_(False)
-        
         # Inject LoRA
-        lora_sam = self.inject_lora(lora_sam, **kwargs)
+        # lora_sam = self.inject_lora(lora_sam, **kwargs)
+
+        replace_LoRA(lora_sam.mask_decoder, MonkeyPatchLoRALinear)
+        replace_LoRA(lora_sam, MonkeyPatchLoRAConv2D)
 
         # Verify
-        # self.check_lora_sam(lora_sam)
+        self.check_lora_sam(lora_sam)
 
         return lora_sam
 
     def check_lora_sam(self, model):
         print("lora sam structure: \n", model)
 
-        for name, param in model.named_parameters():
-            print(f"{name}: requires_grad={param.requires_grad}")
+        # for name, param in model.named_parameters():
+        #     print(f"{name}: requires_grad={param.requires_grad}")
 
         model_parameters = filter(lambda p: True, model.parameters())
         params = sum([np.prod(p.size()) for p in model_parameters])
@@ -159,11 +158,13 @@ class MyFastSAM(pl.LightningModule):
                if kwargs.get("linear"):
                     block = MonkeyPatchLoRALinear(block, rank, scale)
                     setattr(model, name, block)
+
             # patch every nn.Conv2d in the model
             elif isinstance(block, nn.Conv2d):
                 if kwargs.get("conv2d"):
                     block = MonkeyPatchLoRAConv2D(block, rank, scale)
                     setattr(model, name, block)
+
             # patch every nn.ConvTranspose2d in the model
             elif isinstance(block, nn.ConvTranspose2d):
                 if kwargs.get("convtrans2d"):
@@ -178,7 +179,8 @@ class MyFastSAM(pl.LightningModule):
         lora_parameters = [param for param in self.parameters() if param.requires_grad]
         # make sure original sam don't requires_grad
         optimizer = torch.optim.AdamW(lora_parameters, lr=self.lr)
-        return optimizer
+        scheduler = StepLR(optimizer, step_size=3, gamma=0.1)
+        return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
     def calc_loss(self, prediction, targets):
         iou_preds = [x["iou_predictions"] for x in prediction]
@@ -190,10 +192,13 @@ class MyFastSAM(pl.LightningModule):
         dice_loss = torch.tensor(0., device=device)
         iou_loss = torch.tensor(0., device=device)        
         for pred, target, iou_pred in zip(predictions, targets, iou_preds):
-            dice_loss += 0.1 * self.mask_dice_loss(pred, target)
+            dice_loss += self.mask_dice_loss(pred, target)
             focal_loss += self.mask_focal_loss(pred, target)
             iou_loss += self.iou_token_loss(iou_pred,pred, target)
-        return dice_loss + focal_loss + iou_loss
+        self.log('focal_loss', focal_loss, prog_bar=True)
+        self.log('dice_loss', dice_loss, prog_bar=True)
+        self.log('iou_loss', iou_loss, prog_bar=True)
+        return 0.01 * dice_loss + focal_loss
 
     @staticmethod
     def mask_dice_loss(prediction, targets, epsilon=1):
@@ -240,16 +245,39 @@ class MyFastSAM(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         images, targets = batch
-        images = images
-        targets = [mask for mask in targets]
+        targets = [(mask>0.) for mask in targets]
         batched_input, batched_targets = self.construct_batched_input(images, targets)
         predictions = self.forward(batched_input)
         loss = self.calc_loss(predictions, batched_targets)
         # use same procedure as training, monitor the loss
+        pred_mask = [p["masks"].squeeze(1) for p in predictions]         
+        for p, t in zip(pred_mask, batched_targets):
+            ious = self.calc_IoU(p, t)
+        if batch_idx==0:
+            masks = [pred_mask[0].cpu().numpy(), batched_targets[0].cpu().numpy()]
+            image_cpu = batched_input[0]["image"].cpu().permute(1, 2, 0)
+            box_cpu = batched_input[0]["boxes"].cpu()
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            titles = ["Predicted Masks", "Ground Truth Masks"]
+
+            for axis, mask in zip(axes, masks):
+                axis.imshow(image_cpu)
+                for m in mask:
+                    show_mask(m, axis, random_color=True)
+                for b in box_cpu:
+                    show_box(b, axis)
+                axis.set_title(f"mean IoU: {ious.mean().item():.4f}")
+
+            # Set IoU in the figure title
+            fig.suptitle(f"Batch {batch_idx} - IoU: {ious.mean().item():.4f}")
+            
+            save_fig(fig, "./train_output_plots", batch_idx)
+
         self.log('val_loss', loss, prog_bar=True)
+        self.log('val_iou', ious.mean(), prog_bar=True)
         return loss
 
-    def construct_batched_input(self, images, targets, prompt='box', max_boxes=10):
+    def construct_batched_input(self, images, targets, prompt='box', max_boxes=15):
         # 1a. single point prompt training
         # 1b. iterative point prompt training up to 3 iteration
         # 2. box prompt training, only 1 iteration
@@ -305,8 +333,8 @@ class MyFastSAM(pl.LightningModule):
             # Box Prompt Training
             if prompt == 'box':
                 boxes, updated_target = self.generate_box_prompts(target, max_boxes=max_boxes, device=device)
-                boxes[:, 0::2] /= W
-                boxes[:, 1::2] /= H
+                # boxes[:, 0::2] /= W
+                # boxes[:, 1::2] /= H
                 input_dict = {
                     "image": img,
                     "original_size": (updated_target.shape[1], updated_target.shape[2]),
@@ -323,8 +351,18 @@ class MyFastSAM(pl.LightningModule):
         #         print(f"Point Coords: {input_dict['point_coords'].shape}")
         #     if "boxes" in input_dict:
         #         print(f"Boxes: {input_dict['boxes'].shape}")
-
         return batched_input, updated_targets
+
+    def calc_IoU(self, pred, target):
+        # pred = torch.from_numpy(pred).to(target.device).bool()
+        pred = pred.to(target.device).bool()
+        target = target.bool()
+
+        intersections = torch.sum(pred & target, dim=(1, 2))
+        unions = torch.sum(pred | target, dim=(1, 2))        
+        epsilon = 1e-7
+        ious = intersections.float() / (unions.float() + epsilon)        
+        return ious
 
     def generate_box_prompts(self,target, max_boxes, device):
         # Step 1: 过滤掉空白掩码
@@ -337,11 +375,25 @@ class MyFastSAM(pl.LightningModule):
         # Step 3: 为每个掩码生成边框
         boxes = []
         updated_targets = []
+        # for mask in selected_masks:
+        #     y, x = torch.where(mask > 0)
+        #     x_min, x_max = x.min().item(), x.max().item()
+        #     y_min, y_max = y.min().item(), y.max().item()
+        #     boxes.append([x_min, y_min, x_max, y_max])
+        #     updated_targets.append(mask)
         for mask in selected_masks:
-            x, y = torch.where(mask > 0)
-            x_min, x_max = x.min().item(), x.max().item()
-            y_min, y_max = y.min().item(), y.max().item()
-            boxes.append([x_min, y_min, x_max, y_max])
+            mask_y, mask_x = torch.where(mask > 0)
+            x1, y1, x2, y2 = mask_x.min(), mask_y.min(), mask_x.max(), mask_y.max()
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
+            w = (x2 - x1)
+            h = (y2 - y1)
+            delta_w = min(random.random() * 0.2 * w, 20)
+            delta_h = min(random.random() * 0.2 * h, 20)
+
+            x1, y1, x2, y2  = center_x - (w + delta_w) / 2, center_y - (h + delta_h) / 2, \
+                                center_x + (w + delta_w) / 2, center_y + (h + delta_h) / 2
+            boxes.append([x1, y1, x2, y2])
             updated_targets.append(mask)
         # Pad results if there are fewer than max_boxes masks
         while len(boxes) < max_boxes:
@@ -455,3 +507,19 @@ class MyFastSAM(pl.LightningModule):
         # Stack and return the selected masks
         sampled_masks = torch.stack(selected_masks)
         return sampled_masks
+
+def replace_LoRA(model:nn.Module, cls):
+    for name, block in model.named_children():
+        # patch every nn.Linear in Mlp
+        if isinstance(block, nn.Linear) and cls == MonkeyPatchLoRALinear:
+            block = cls(block, 4, 1)
+            setattr(model, name, block)
+        
+        elif isinstance(block, nn.Conv2d) and cls == MonkeyPatchLoRAConv2D:
+            min_channel = min(block.in_channels, block.out_channels)
+            if min_channel > 4:
+                block = cls(block, 4, 1)
+                setattr(model, name, block)
+                    
+        else:
+            replace_LoRA(block, cls)

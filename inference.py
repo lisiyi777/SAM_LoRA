@@ -21,21 +21,6 @@ class InferSAM:
         self.tuned_predictor = SamPredictor(self.tuned_sam.lora_sam)
 
     def inference_one(self, img, target, coords=None, labels=None, bboxes=None, tuned=True):
-        # # preprocess
-        # img = img.to(self.device)
-        # if coords is not None:
-        #     coords = coords.to(self.device)
-        #     labels = labels.to(self.device).long()
-        # if bboxes is not None:
-        #     bboxes = bboxes.to(self.device)
-
-        # # construct batched input
-        # batches, target = self.orig_sam.construct_batched_input(img.unsqueeze(0), target.unsqueeze(0), prompt='box', max_boxes=20)
-
-        # # forward
-        # results = self.tuned_sam.lora_sam(batches, multimask_output=False)
-        # pred_masks = results[0]["masks"].squeeze(1)
-        # target = target[0]
         if tuned:
             predictor = self.tuned_predictor
         else:
@@ -112,6 +97,12 @@ class InferSAM:
                 plt.imshow(gt_mask, alpha=0.5)
                 plt.title("Ground Truth")  
 
+            for i, gt_mask in enumerate(gt_masks):
+                plt.subplot(3, 3, i+7)
+                plt.imshow(img)
+                plt.imshow(gt_mask, alpha=0.5)
+                plt.title("Ground Truth")  
+
         plt.tight_layout()
         plt.show()
 
@@ -159,7 +150,7 @@ class InferSAM:
             titles=titles
         )
 
-def GetData(high_res):
+def GetData(high_res=False):
     if high_res:
         input_transform = transforms.Compose([
         transforms.Resize((800, 1280), antialias=True),
@@ -200,7 +191,7 @@ def inference_with_points(infer:InferSAM, high_res=False, tuned=True):
     # input_label = torch.tensor([0,1])
     # input_box = torch.tensor([40, 50, 130, 110])
     input_point = np.array([[100,75],[150,75]])
-    input_label = np.array([0,1])
+    input_label = np.array([1,1])
     input_box = np.array([40, 50, 130, 110])
     kwargs["coords"] = input_point
     kwargs["labels"] = input_label
@@ -241,16 +232,88 @@ def inference_all(infer:InferSAM, high_res=False):
     
     infer.inference_all(image)
 
+def save_fig(fig, save_dir, batch_idx):
+    """Save the figure with a unique name based on the batch index."""
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"batch_{batch_idx}.png")
+    fig.savefig(save_path)
+    print(f"Figure saved at {save_path}")
+
+def show_mask(mask, ax, random_color=False):
+    if random_color:
+        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+    else:
+        color = np.array([30/255, 144/255, 255/255, 0.6])
+    h, w = mask.shape
+    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+    ax.imshow(mask_image)
+    
+def show_points(coords, labels, ax, marker_size=350):
+    pos_points = coords[labels==1]
+    neg_points = coords[labels==0]
+    ax.scatter(pos_points[0, 0], pos_points[0, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
+    # ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
+    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)   
+    
+def show_box(box, ax):
+    x0, y0 = box[0], box[1]
+    w, h = box[2] - box[0], box[3] - box[1]
+    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2)) 
+
+def test(infer: InferSAM):
+    model = infer.orig_sam
+    device = infer.device
+    train_loader, val_loader = get_loaders(
+        data_dir="./data",
+        batch_size=1,
+        use_small_subset=True
+    )
+    save_dir = "./output_plots"
+    model.eval()
+    with torch.no_grad():
+        total_ious = torch.tensor([], device=device)
+        for batch_idx, (images, targets) in tqdm(enumerate(train_loader)):
+            images = images.to(device)
+            targets = [(mask>0.).to(device) for mask in targets]
+            batched_input, batched_targets = model.construct_batched_input(images, targets, max_boxes=15)
+            predictions = model.forward(batched_input)
+
+            pred_mask = [p["masks"].squeeze(1) for p in predictions] 
+            
+            for p, t in zip(pred_mask, batched_targets):
+                ious = infer.calc_IoU(p, t)
+                total_ious = torch.cat([total_ious, ious])
+        
+            masks = [pred_mask[0].cpu().numpy(), batched_targets[0].cpu().numpy()]
+            image_cpu = batched_input[0]["image"].cpu().permute(1, 2, 0)
+            box_cpu = batched_input[0]["boxes"].cpu()
+            # print(ious.shape)
+
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            titles = ["Predicted Masks", "Ground Truth Masks"]
+
+            for axis, mask in zip(axes, masks):
+                axis.imshow(image_cpu)
+                for m in mask:
+                    show_mask(m, axis, random_color=True)
+                for b in box_cpu:
+                    show_box(b, axis)
+                axis.set_title(f"mean IoU: {ious.mean().item():.4f}")
+
+            # Set IoU in the figure title
+            fig.suptitle(f"Batch {batch_idx} - IoU: {total_ious.mean().item():.4f}")
+            
+            save_fig(fig, save_dir, batch_idx)
+
+        mean_ious = total_ious.mean()
+        print("TEST total masks {} mIoU {}".format(len(total_ious), mean_ious.item()))
 
 if __name__ == "__main__":
     orig_path = ".\checkpoints\sam_vit_b_01ec64.pth"
-    tuned_path = ".\logs\checkpoints\MyFastSAM-epoch=08-val_loss=1.1954.ckpt"
+    tuned_path = ".\logs\checkpoints\MyFastSAM-epoch=02-val_loss=0.4450.ckpt"
     infer = InferSAM(orig_path, tuned_path)
 
     # inference_with_points(infer, high_res=False, tuned=True)
-    inference_all(infer)
+    # inference_all(infer)
+    test(infer)
 
-    # # inference the original sam for the entire image
-    # inference_all(checkpoint=orig_path, origin=True)
-    # # inference the lora sam for the entire image
-    # inference_all(checkpoint=tuned_path)
