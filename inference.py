@@ -12,7 +12,7 @@ class InferSAM:
     def __init__(self, orig_path="sam_vit_b_01ec64.pth", tuned_path=None):
         self.device = "cuda"
 
-        kwargs = {"rank": 4, "scale": 1}
+        kwargs = {"linear": True, "conv2d": False}
         self.orig_sam = MyFastSAM(orig_path, **kwargs).to(self.device)
         if tuned_path is not None:
             self.tuned_sam = MyFastSAM.load_from_checkpoint(tuned_path, **kwargs).to(self.device)
@@ -71,7 +71,6 @@ class InferSAM:
         #     coords = coords.cpu()
         # if bboxes is not None:
         #     bboxes = bboxes.cpu()
-        
 
         for i, (score, mask, gt_mask) in enumerate(zip(ious, masks, gt_masks)):
             ax = plt.subplot(3, 3, i + 1)
@@ -260,31 +259,28 @@ def show_box(box, ax):
     w, h = box[2] - box[0], box[3] - box[1]
     ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2)) 
 
-def test(infer: InferSAM):
-    model = infer.orig_sam
+def test(infer: InferSAM, val_loader):
+    model = infer.tuned_sam
     device = infer.device
-    train_loader, val_loader = get_loaders(
-        data_dir="./data",
-        batch_size=1,
-        use_small_subset=True
-    )
     save_dir = "./output_plots"
     model.eval()
     with torch.no_grad():
-        total_ious = torch.tensor([], device=device)
-        for batch_idx, (images, targets) in tqdm(enumerate(train_loader)):
-            images = images.to(device)
-            targets = [(mask>0.).to(device) for mask in targets]
-            batched_input, batched_targets = model.construct_batched_input(images, targets, max_boxes=15)
-            predictions = model.forward(batched_input)
+        ious = torch.tensor([], device=device)
+        for batch_idx, (image, target) in tqdm(enumerate(val_loader)):
+            image = image.to(device)
+            target = [mask.to(device) for mask in target]
+            batched_input, target = model.construct_batched_input(image, target)
+            target = torch.stack(target, dim=0)
+            h, w = target.shape[-2:]
+            predictions = model.forward(batched_input, multimask_output=False)
 
-            pred_mask = [p["masks"].squeeze(1) for p in predictions] 
+            pred_mask = [p["masks"].squeeze(1) for p in predictions]         
+            for p, t in zip(pred_mask, target):
+                iou = infer.calc_IoU(p, t)
             
-            for p, t in zip(pred_mask, batched_targets):
-                ious = infer.calc_IoU(p, t)
-                total_ious = torch.cat([total_ious, ious])
+                ious = torch.cat([ious, ious])
         
-            masks = [pred_mask[0].cpu().numpy(), batched_targets[0].cpu().numpy()]
+            masks = [pred_mask[0].cpu().numpy(), target[0].cpu().numpy()]
             image_cpu = batched_input[0]["image"].cpu().permute(1, 2, 0)
             box_cpu = batched_input[0]["boxes"].cpu()
             # print(ious.shape)
@@ -310,10 +306,15 @@ def test(infer: InferSAM):
 
 if __name__ == "__main__":
     orig_path = ".\checkpoints\sam_vit_b_01ec64.pth"
-    tuned_path = ".\logs\checkpoints\MyFastSAM-epoch=02-val_loss=0.4450.ckpt"
+    tuned_path = ".\checkpoints\MyFastSAM-epoch=05.ckpt"
     infer = InferSAM(orig_path, tuned_path)
+    train_loader, val_loader = get_loaders(
+        data_dir="./data",
+        batch_size=1,
+        use_small_subset=30
+    )
 
     # inference_with_points(infer, high_res=False, tuned=True)
     # inference_all(infer)
-    test(infer)
+    test(infer, val_loader)
 
