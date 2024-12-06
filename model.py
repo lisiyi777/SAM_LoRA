@@ -420,10 +420,10 @@ class MyFastSAM(pl.LightningModule):
 
             # Box Prompt Training
             if prompt == 'box':
-                boxes, updated_target = self.generate_inference_prompts(target, max_boxes=max_boxes, device=device)
+                boxes = self.generate_inference_prompts(target, device=device)
                 input_dict = {
                     "image": img.cuda(),
-                    "original_size": (updated_target.shape[1], updated_target.shape[2]),
+                    "original_size": (target.shape[1], target.shape[2]),
                     "boxes": boxes.cuda(),
                 }
 
@@ -436,18 +436,10 @@ class MyFastSAM(pl.LightningModule):
 
         boxes = []
         for mask in non_empty_masks:
-            mask_y, mask_x = torch.where(mask > 0)
-            x1, y1, x2, y2 = mask_x.min(), mask_y.min(), mask_x.max(), mask_y.max()
-            # center_x = (x1 + x2) / 2
-            # center_y = (y1 + y2) / 2
-            # w = (x2 - x1)
-            # h = (y2 - y1)
-            # delta_w = min(random.random() * 0.2 * w, 20)
-            # delta_h = min(random.random() * 0.2 * h, 20)
-
-            # x1, y1, x2, y2  = center_x - (w + delta_w) / 2, center_y - (h + delta_h) / 2, \
-            #                     center_x + (w + delta_w) / 2, center_y + (h + delta_h) / 2
-            boxes.append([x1, y1, x2, y2])
+            y, x = torch.where(mask > 0)
+            x_min, x_max = x.min().item(), x.max().item()
+            y_min, y_max = y.min().item(), y.max().item()
+            boxes.append([x_min, y_min, x_max, y_max])
 
         boxes = torch.tensor(boxes, dtype=torch.float, device=device)
         return boxes

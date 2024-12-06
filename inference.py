@@ -259,7 +259,7 @@ def show_box(box, ax):
     w, h = box[2] - box[0], box[3] - box[1]
     ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2)) 
 
-def test(infer: InferSAM, val_loader):
+def new_inference(infer: InferSAM, val_loader):
     model = infer.tuned_sam
     device = infer.device
     save_dir = "./output_plots"
@@ -269,7 +269,7 @@ def test(infer: InferSAM, val_loader):
         for batch_idx, (image, target) in tqdm(enumerate(val_loader)):
             image = image.to(device)
             target = [mask.to(device) for mask in target]
-            batched_input, target = model.construct_batched_input(image, target)
+            batched_input = model.construct_inference_input(image, target)
             target = torch.stack(target, dim=0)
             h, w = target.shape[-2:]
             predictions = model.forward(batched_input, multimask_output=False)
@@ -278,7 +278,7 @@ def test(infer: InferSAM, val_loader):
             for p, t in zip(pred_mask, target):
                 iou = infer.calc_IoU(p, t)
             
-                ious = torch.cat([ious, ious])
+                ious = torch.cat([iou, iou])
         
             masks = [pred_mask[0].cpu().numpy(), target[0].cpu().numpy()]
             image_cpu = batched_input[0]["image"].cpu().permute(1, 2, 0)
@@ -295,14 +295,11 @@ def test(infer: InferSAM, val_loader):
                 for b in box_cpu:
                     show_box(b, axis)
                 axis.set_title(f"mean IoU: {ious.mean().item():.4f}")
-
-            # Set IoU in the figure title
-            fig.suptitle(f"Batch {batch_idx} - IoU: {total_ious.mean().item():.4f}")
             
             save_fig(fig, save_dir, batch_idx)
 
-        mean_ious = total_ious.mean()
-        print("TEST total masks {} mIoU {}".format(len(total_ious), mean_ious.item()))
+        mean_ious = ious.mean()
+        print("TEST total masks {} mIoU {}".format(len(ious), mean_ious.item()))
 
 if __name__ == "__main__":
     orig_path = ".\checkpoints\sam_vit_b_01ec64.pth"
@@ -316,5 +313,5 @@ if __name__ == "__main__":
 
     # inference_with_points(infer, high_res=False, tuned=True)
     # inference_all(infer)
-    test(infer, val_loader)
+    new_inference(infer, val_loader)
 
