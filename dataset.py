@@ -80,7 +80,7 @@ def collate_fn(batch):
     return torch.stack(images, dim=0), target
 
 
-def get_loaders(data_dir="..\..\SAM_LoRA\data", batch_size=32, preprocess_idx=None, use_small_subset=None):
+def get_loaders(data_dir="..\..\SAM_LoRA\data", batch_size=8, preprocess_idx=None, use_small_subset=None):
     input_transform = transforms.Compose([
         transforms.Resize((160, 256), antialias=True),
         transforms.ToTensor(),

@@ -380,58 +380,22 @@ class MyFastSAM(pl.LightningModule):
         sampled_masks = torch.stack(selected_masks)
         return sampled_masks
 
-    def construct_inference_input(self, images, targets, prompt='box'):
+    def construct_inference_input_all(self, images, targets):
         batched_input = []
         device = images[0].device
 
         for img, target in zip(images, targets):
-            # Randomly sample one point per mask
-            N, H, W = target.shape
-            mask_idxs = torch.arange(N, device=device)
-
-            if prompt == 'point':
-                point_coords = []
-                point_labels = []
-                for idx in mask_idxs:
-                    mask = target[idx]
-                    # Sample a single foreground point
-                    fg_points = torch.nonzero(mask, as_tuple=False).to(device)
-                    if len(fg_points) > 0:
-                        point_coords.append(fg_points[torch.randint(len(fg_points), (1,), device=device)].squeeze(0))
-                        point_labels.append(1)  # Foreground label
-
-                    # Sample a single background point
-                    bg_points = torch.nonzero(mask == 0, as_tuple=False).to(device)  # Ensure device consistency
-                    if len(bg_points) > 0:
-                        point_coords.append(bg_points[torch.randint(len(bg_points), (1,), device=device)].squeeze(0))
-                        point_labels.append(0)  # Background label
-
-                # Convert to tensors and normalize point coordinates to match the input size
-                point_coords = torch.stack(point_coords, dim=0).float().to(device) if point_coords else torch.empty(0, 2, device=device)
-                point_labels = torch.tensor(point_labels, device=device).float() if point_labels else torch.empty(0, device=device)
-
-                # Construct the input dictionary
-                input_dict = {
-                    "image": img.cuda(),
-                    "original_size": (H, W),
-                    "point_coords": point_coords.unsqueeze(0),  # [1, N, 2]
-                    "point_labels": point_labels.unsqueeze(0),  # [1, N]
-                }
-
-            # Box Prompt Training
-            if prompt == 'box':
-                boxes = self.generate_inference_prompts(target, device=device)
-                input_dict = {
-                    "image": img.cuda(),
-                    "original_size": (target.shape[1], target.shape[2]),
-                    "boxes": boxes.cuda(),
-                }
+            boxes = self.generate_inference_prompts_all(target, device=device)
+            input_dict = {
+                "image": img.cuda(),
+                "original_size": (target.shape[1], target.shape[2]),
+                "boxes": boxes.cuda(),
+            }
 
             batched_input.append(input_dict)
-
         return batched_input
     
-    def generate_inference_prompts(self, target, device):
+    def generate_inference_prompts_all(self, target, device):
         non_empty_masks = [mask for mask in target if mask.sum() > 0]
 
         boxes = []
@@ -443,6 +407,70 @@ class MyFastSAM(pl.LightningModule):
 
         boxes = torch.tensor(boxes, dtype=torch.float, device=device)
         return boxes
+    def construct_inference_input(self, images, targets):
+        large_inputs, medium_inputs, small_inputs = [], [], []
+        device = images[0].device
+
+        for img, target in zip(images, targets):
+            (
+                (large_boxes, large_masks),
+                (medium_boxes, medium_masks),
+                (small_boxes, small_masks),
+            ) = self.generate_inference_prompts(target, device=device)
+
+            large_inputs.append({
+                "image": img.cuda(),
+                "original_size": (target.shape[1], target.shape[2]),
+                "boxes": large_boxes.cuda(),
+            })
+            medium_inputs.append({
+                "image": img.cuda(),
+                "original_size": (target.shape[1], target.shape[2]),
+                "boxes": medium_boxes.cuda(),
+            })
+            small_inputs.append({
+                "image": img.cuda(),
+                "original_size": (target.shape[1], target.shape[2]),
+                "boxes": small_boxes.cuda(),
+            })
+
+        return large_inputs, medium_inputs, small_inputs, large_masks, medium_masks, small_masks
+
+    def generate_inference_prompts(self, target, device):
+        non_empty_masks = [mask for mask in target if mask.sum() > 0]
+
+        large_boxes, medium_boxes, small_boxes = [], [], []
+        large_masks, medium_masks, small_masks = [], [], []
+
+        large_threshold = 1000
+        medium_threshold = 300
+
+        for mask in non_empty_masks:
+            pixel_count = mask.sum().item()
+            y, x = torch.where(mask > 0)
+            x_min, x_max = x.min().item(), x.max().item()
+            y_min, y_max = y.min().item(), y.max().item()
+            box = [x_min, y_min, x_max, y_max]
+
+            if pixel_count > large_threshold:
+                large_boxes.append(box)
+                large_masks.append(mask)
+            elif medium_threshold < pixel_count <= large_threshold:
+                medium_boxes.append(box)
+                medium_masks.append(mask)
+            else:
+                small_boxes.append(box)
+                small_masks.append(mask)
+
+        large_boxes = torch.tensor(large_boxes, dtype=torch.float, device=device)
+        medium_boxes = torch.tensor(medium_boxes, dtype=torch.float, device=device)
+        small_boxes = torch.tensor(small_boxes, dtype=torch.float, device=device)
+
+        return (
+            (large_boxes, large_masks),
+            (medium_boxes, medium_masks),
+            (small_boxes, small_masks),
+        )
 
 @staticmethod
 def mask_dice_loss(prediction, targets, epsilon=1):

@@ -7,6 +7,7 @@ from dataset import *
 from model import *
 import supervision as sv
 from segment_anything import sam_model_registry, SamAutomaticMaskGenerator, SamPredictor
+from collections import defaultdict
 
 class InferSAM:
     def __init__(self, orig_path="sam_vit_b_01ec64.pth", tuned_path=None):
@@ -106,6 +107,16 @@ class InferSAM:
         plt.show()
 
     def calc_IoU(self, pred, target):
+        # # pred = torch.from_numpy(pred).to(target.device).bool()
+        # pred = pred.to(target.device).bool()
+        # target = target.bool()
+
+        # intersections = torch.sum(pred & target, dim=(1, 2))
+        # unions = torch.sum(pred | target, dim=(1, 2))        
+        # epsilon = 1e-7
+        # ious = intersections.float() / (unions.float() + epsilon)        
+        # return ious
+        
         # pred = torch.from_numpy(pred).to(target.device).bool()
         pred = pred.to(target.device).bool()
         target = target.bool()
@@ -115,7 +126,7 @@ class InferSAM:
         epsilon = 1e-7
         ious = intersections.float() / (unions.float() + epsilon)        
         return ious
-        
+
     def inference_all(self, image):
         image_bgr = image[[2, 1, 0], :, :]
 
@@ -259,7 +270,7 @@ def show_box(box, ax):
     w, h = box[2] - box[0], box[3] - box[1]
     ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2)) 
 
-def new_inference(infer: InferSAM, val_loader):
+def inference_all(infer: InferSAM, val_loader):
     model = infer.tuned_sam
     device = infer.device
     save_dir = "./output_plots"
@@ -269,7 +280,7 @@ def new_inference(infer: InferSAM, val_loader):
         for batch_idx, (image, target) in tqdm(enumerate(val_loader)):
             image = image.to(device)
             target = [mask.to(device) for mask in target]
-            batched_input = model.construct_inference_input(image, target)
+            batched_input = model.construct_inference_input_all(image, target)
             target = torch.stack(target, dim=0)
             h, w = target.shape[-2:]
             predictions = model.forward(batched_input, multimask_output=False)
@@ -278,7 +289,7 @@ def new_inference(infer: InferSAM, val_loader):
             for p, t in zip(pred_mask, target):
                 iou = infer.calc_IoU(p, t)
             
-                ious = torch.cat([iou, iou])
+                ious = torch.cat([ious, iou])
         
             masks = [pred_mask[0].cpu().numpy(), target[0].cpu().numpy()]
             image_cpu = batched_input[0]["image"].cpu().permute(1, 2, 0)
@@ -292,18 +303,87 @@ def new_inference(infer: InferSAM, val_loader):
                 axis.imshow(image_cpu)
                 for m in mask:
                     show_mask(m, axis, random_color=True)
-                for b in box_cpu:
-                    show_box(b, axis)
+                # for b in box_cpu:
+                #     show_box(b, axis)
                 axis.set_title(f"mean IoU: {ious.mean().item():.4f}")
             
             save_fig(fig, save_dir, batch_idx)
 
         mean_ious = ious.mean()
-        print("TEST total masks {} mIoU {}".format(len(ious), mean_ious.item()))
+        print(f"TEST mIoU {mean_ious.item()}")
+
+def split_masks_by_size(infer: InferSAM, val_loader):
+    iou_results = defaultdict(list)
+    model = infer.tuned_sam
+    device = infer.device
+    save_dir = "./output_plots"
+    model.eval()
+    with torch.no_grad():
+        for batch_idx, (image, target) in tqdm(enumerate(val_loader)):
+            image = image.to(device)
+            target = [mask.to(device) for mask in target]
+            
+            large_inputs, medium_inputs, small_inputs, target_large, target_medium, target_small = model.construct_inference_input(image, target)
+            
+            if len(target_large) != 0:
+                large_preds = model.forward(large_inputs, multimask_output=False)
+            if len(target_medium) != 0:
+                medium_preds = model.forward(medium_inputs, multimask_output=False)
+            if len(target_small) != 0:
+                small_preds = model.forward(small_inputs, multimask_output=False)
+            
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+            titles = ["Large Predictions", "Medium Predictions", "Small Predictions"]
+            
+            large_preds = torch.stack([i["masks"] for i in large_preds], dim=0)    #bz,num_mask,1,160,256
+            medium_preds = torch.stack([i["masks"] for i in medium_preds], dim=0)    #bz,num_mask,1,160,256
+            small_preds = torch.stack([i["masks"] for i in small_preds], dim=0)    #bz,num_mask,1,160,256
+            batch_size, _, _, h, w = large_preds.shape
+            large_preds = large_preds.reshape(batch_size, -1, h, w)
+            medium_preds = medium_preds.reshape(batch_size, -1, h, w)
+            small_preds = small_preds.reshape(batch_size, -1, h, w)
+
+            for p, t in zip(small_preds, target_small):
+                iou = infer.calc_IoU(p, t)
+                iou_results["small"].extend(iou.cpu().tolist())
+            for p, t in zip(medium_preds, target_medium):
+                iou = infer.calc_IoU(p, t)
+                iou_results["medium"].extend(iou.cpu().tolist())
+            for p, t in zip(large_preds, target_large):
+                iou = infer.calc_IoU(p, t)
+                iou_results["large"].extend(iou.cpu().tolist())
+
+            for idx, (pred, target, title) in enumerate(zip(
+                [large_preds, medium_preds, small_preds],
+                [target_large, target_medium, target_small],
+                titles,
+            )):
+                axes[0, idx].imshow(image[0].cpu().permute(1, 2, 0))
+                for m in pred[0]:
+                    show_mask(m.cpu().numpy(), axes[0, idx], random_color=True)
+                axes[0, idx].set_title(title)
+
+                axes[1, idx].imshow(image[0].cpu().permute(1, 2, 0))
+                for m in target:
+                    show_mask(m.cpu().numpy(), axes[1, idx], random_color=True)
+                axes[1, idx].set_title(f"{title} Ground Truth")
+
+            save_fig(fig, save_dir, f"batch_{batch_idx}.png")
+            plt.close(fig)
+
+    # Calculate and log mean IoU for each size category
+    for size, iou_list in iou_results.items():
+        mean_iou = sum(iou_list) / len(iou_list) if iou_list else 0
+        print(f"Mean IoU for {size}: {mean_iou:.4f}")
+    
+    # Overall mIoU
+    all_ious = [iou for iou_list in iou_results.values() for iou in iou_list]
+    overall_miou = sum(all_ious) / len(all_ious) if all_ious else 0
+    print(f"Overall Mean IoU: {overall_miou:.4f}")
 
 if __name__ == "__main__":
     orig_path = ".\checkpoints\sam_vit_b_01ec64.pth"
-    tuned_path = ".\checkpoints\MyFastSAM-epoch=05.ckpt"
+    tuned_path = ".\checkpoints\MyFastSAM-epoch=06-val_loss=30.8608.ckpt"
     infer = InferSAM(orig_path, tuned_path)
     train_loader, val_loader = get_loaders(
         data_dir="./data",
@@ -312,6 +392,6 @@ if __name__ == "__main__":
     )
 
     # inference_with_points(infer, high_res=False, tuned=True)
-    # inference_all(infer)
-    new_inference(infer, val_loader)
+    inference_all(infer, val_loader)
+    split_masks_by_size(infer, val_loader)
 
