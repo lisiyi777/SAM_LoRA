@@ -407,6 +407,7 @@ class MyFastSAM(pl.LightningModule):
 
         boxes = torch.tensor(boxes, dtype=torch.float, device=device)
         return boxes
+    
     def construct_inference_input(self, images, targets):
         large_inputs, medium_inputs, small_inputs = [], [], []
         device = images[0].device

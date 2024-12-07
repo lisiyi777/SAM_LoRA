@@ -278,7 +278,7 @@ def inference_all(infer: InferSAM, val_loader):
     with torch.no_grad():
         ious = torch.tensor([], device=device)
         for batch_idx, (image, target) in tqdm(enumerate(val_loader)):
-            image = image.to(device)
+            image = image.to(device)*255.
             target = [mask.to(device) for mask in target]
             batched_input = model.construct_inference_input_all(image, target)
             target = torch.stack(target, dim=0)
@@ -300,7 +300,7 @@ def inference_all(infer: InferSAM, val_loader):
             titles = ["Predicted Masks", "Ground Truth Masks"]
 
             for axis, mask in zip(axes, masks):
-                axis.imshow(image_cpu)
+                axis.imshow(image_cpu/255.)
                 for m in mask:
                     show_mask(m, axis, random_color=True)
                 # for b in box_cpu:
@@ -320,7 +320,7 @@ def split_masks_by_size(infer: InferSAM, val_loader):
     model.eval()
     with torch.no_grad():
         for batch_idx, (image, target) in tqdm(enumerate(val_loader)):
-            image = image.to(device)
+            image = image.to(device)*255.
             target = [mask.to(device) for mask in target]
             
             large_inputs, medium_inputs, small_inputs, target_large, target_medium, target_small = model.construct_inference_input(image, target)
@@ -358,12 +358,12 @@ def split_masks_by_size(infer: InferSAM, val_loader):
                 [target_large, target_medium, target_small],
                 titles,
             )):
-                axes[0, idx].imshow(image[0].cpu().permute(1, 2, 0))
+                axes[0, idx].imshow((image[0]/255.).cpu().permute(1, 2, 0))
                 for m in pred[0]:
                     show_mask(m.cpu().numpy(), axes[0, idx], random_color=True)
                 axes[0, idx].set_title(title)
 
-                axes[1, idx].imshow(image[0].cpu().permute(1, 2, 0))
+                axes[1, idx].imshow((image[0]/255.).cpu().permute(1, 2, 0))
                 for m in target:
                     show_mask(m.cpu().numpy(), axes[1, idx], random_color=True)
                 axes[1, idx].set_title(f"{title} Ground Truth")
