@@ -5,13 +5,21 @@ The Segmentation Anything Model (SAM) demonstrates impressive generalization and
 # Usage
 1. Pre-process and save masks.
   ```
-  dataset.py
+  python dataset.py
   ```
 3. Train LoRA-SAM
   ```
-  train.py
+  python train.py
   ```
 4. Inference(revise the checkpoint path)
   ```
-  inference.py
+  python inference.py
+  ```
+5. ncut visualization
+  ```
+  # for original SAM
+  pythoon ncut_vis_origin_sam.py
+
+  # for LoRA-SAM
+  python tuned_sam_ncut.py
   ```
