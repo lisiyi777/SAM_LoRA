@@ -54,10 +54,10 @@ class MyFastSAM(pl.LightningModule):
         lora_sam = deepcopy(orig_sam)
         BaseFinetuning.freeze(lora_sam, train_bn=True)
 
-        # Inject LoRA
-        # lora_sam = self.inject_lora(lora_sam, **kwargs)
-
-        replace_LoRA(lora_sam.mask_decoder, MonkeyPatchLoRALinear)
+        # self.inject_lora(lora_sam, MonkeyPatchLoRALinear, **kwargs)
+        # self.inject_lora(lora_sam, MonkeyPatchLoRAConv2D, **kwargs)
+        replace_LoRA(lora_sam, MonkeyPatchLoRALinear)
+        # replace_LoRA(lora_sam, MonkeyPatchLoRAConv2D)
         # if self.linear:
         #     replace_LoRA(lora_sam.mask_decoder, MonkeyPatchLoRALinear)
         # if self.conv2d:
@@ -178,7 +178,7 @@ class MyFastSAM(pl.LightningModule):
         scheduler = StepLR(optimizer, step_size=3, gamma=0.1)
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
-    def construct_batched_input(self, images, targets, prompt='box', max_boxes=16):
+    def construct_batched_input(self, images, targets, prompt='box', max_boxes=15):
         # 1a. single point prompt training
         # 1b. iterative point prompt training up to 3 iteration
         # 2. box prompt training, only 1 iteration
@@ -219,14 +219,49 @@ class MyFastSAM(pl.LightningModule):
                     "point_coords": point_coords.unsqueeze(0),  # [1, N, 2]
                     "point_labels": point_labels.unsqueeze(0),  # [1, N]
                 }
+                updated_targets = targets
 
-            # Box Prompt Training
             if prompt == 'box':
                 boxes, updated_target = self.generate_box_prompts(target, max_boxes=max_boxes, device=device)
                 input_dict = {
                     "image": img.cuda(),
                     "original_size": (updated_target.shape[1], updated_target.shape[2]),
                     "boxes": boxes.cuda(),
+                }
+
+                updated_targets.append(updated_target)
+
+            batched_input.append(input_dict)
+
+            if prompt == 'both':
+                boxes, updated_target = self.generate_box_prompts(target, max_boxes=max_boxes, device=device)
+
+                point_coords = []
+                point_labels = []
+                for idx in mask_idxs:
+                    mask = updated_target[idx]
+                    # Sample a single foreground point
+                    fg_points = torch.nonzero(mask, as_tuple=False).to(device)
+                    if len(fg_points) > 0:
+                        point_coords.append(fg_points[torch.randint(len(fg_points), (1,), device=device)].squeeze(0))
+                        point_labels.append(1)  # Foreground label
+
+                    # Sample a single background point
+                    bg_points = torch.nonzero(mask == 0, as_tuple=False).to(device)  # Ensure device consistency
+                    if len(bg_points) > 0:
+                        point_coords.append(bg_points[torch.randint(len(bg_points), (1,), device=device)].squeeze(0))
+                        point_labels.append(0)  # Background label
+
+                # Convert to tensors and normalize point coordinates to match the input size
+                point_coords = torch.stack(point_coords, dim=0).float().to(device) if point_coords else torch.empty(0, 2, device=device)
+                point_labels = torch.tensor(point_labels, device=device).float() if point_labels else torch.empty(0, device=device)
+
+                input_dict = {
+                    "image": img.cuda(),
+                    "original_size": (updated_target.shape[1], updated_target.shape[2]),
+                    "boxes": boxes.cuda(),
+                    "point_coords": point_coords.unsqueeze(0),  # [1, N, 2]
+                    "point_labels": point_labels.unsqueeze(0),  # [1, N]
                 }
 
                 updated_targets.append(updated_target)
@@ -243,24 +278,15 @@ class MyFastSAM(pl.LightningModule):
 
         boxes = []
         updated_targets = []
-        # for mask in selected_masks:
-        #     y, x = torch.where(mask > 0)
-        #     x_min, x_max = x.min().item(), x.max().item()
-        #     y_min, y_max = y.min().item(), y.max().item()
-        #     boxes.append([x_min, y_min, x_max, y_max])
-        #     updated_targets.append(mask)
         for mask in selected_masks:
-            mask_y, mask_x = torch.where(mask > 0)
-            x1, y1, x2, y2 = mask_x.min(), mask_y.min(), mask_x.max(), mask_y.max()
-            center_x = (x1 + x2) / 2
-            center_y = (y1 + y2) / 2
-            w = (x2 - x1)
-            h = (y2 - y1)
-            delta_w = min(random.random() * 0.2 * w, 20)
-            delta_h = min(random.random() * 0.2 * h, 20)
+            y, x = torch.where(mask > 0)
+            x1, x2 = x.min().item(), x.max().item()
+            y1, y2 = y.min().item(), y.max().item()
+            ratio = 0.1
+            w = x2 - x1
+            h = y2 - y1
 
-            x1, y1, x2, y2  = center_x - (w + delta_w) / 2, center_y - (h + delta_h) / 2, \
-                                center_x + (w + delta_w) / 2, center_y + (h + delta_h) / 2
+            x1, y1, x2, y2  = x1 - ratio*w, x2 + ratio*w, y1 - ratio*h, y2 + ratio*h 
             boxes.append([x1, y1, x2, y2])
             updated_targets.append(mask)
 
@@ -288,30 +314,29 @@ class MyFastSAM(pl.LightningModule):
             focal_loss += mask_focal_loss(pred, target)
         return dice_loss, focal_loss
 
-    def inject_lora(self, model, **kwargs):
+
+    def inject_lora(self, model, layer_class, **kwargs):
         rank = kwargs.get("rank", 4)
         scale = kwargs.get("scale", 1)
         for name, block in model.named_children():  
-            if isinstance(block, nn.Linear):
+            if isinstance(block, nn.Linear) and layer_class==MonkeyPatchLoRALinear:
             # patch every nn.Linear in the model
-               if kwargs.get("linear"):
-                    block = MonkeyPatchLoRALinear(block, rank, scale)
-                    setattr(model, name, block)
+                block = MonkeyPatchLoRALinear(block, rank, scale)
+                setattr(model, name, block)
 
             # patch every nn.Conv2d in the model
-            elif isinstance(block, nn.Conv2d):
-                if kwargs.get("conv2d"):
-                    block = MonkeyPatchLoRAConv2D(block, rank, scale)
-                    setattr(model, name, block)
+            elif isinstance(block, nn.Conv2d) and layer_class==MonkeyPatchLoRAConv2D:
+                block = MonkeyPatchLoRAConv2D(block, rank, scale)
+                setattr(model, name, block)
 
             # patch every nn.ConvTranspose2d in the model
-            elif isinstance(block, nn.ConvTranspose2d):
-                if kwargs.get("convtrans2d"):
-                    block = MonkeyPatchLoRAConvTranspose2D(block, rank, scale)
-                    setattr(model, name, block)
+            elif isinstance(block, nn.ConvTranspose2d) and layer_class==MonkeyPatchLoRAConvTranspose2D:
+                block = MonkeyPatchLoRAConvTranspose2D(block, rank, scale)
+                setattr(model, name, block)
+
             #iterates over the immediate children of the model (not recursively)
-            elif isinstance(block, nn.Module):
-                self.inject_lora(block, **kwargs)
+            else:
+                self.inject_lora(block, layer_class, **kwargs)
         return model
 
     def point_sample(self,all_masks, points_coords, points_label):
@@ -503,3 +528,4 @@ def iou_token_loss(iou_prediction, prediction, targets):
     batch_iou = batch_iou.unsqueeze(1)
     iou_loss = F.mse_loss(iou_prediction, batch_iou, reduction='mean')
     return iou_loss
+

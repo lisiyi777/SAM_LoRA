@@ -34,12 +34,12 @@ def train(args):
         monitor="val_iou",  # Metric to monitor
         mode="max",  # Save the checkpoint with the lowest validation loss
         dirpath="./checkpoints",
-        filename="Unfreeze-{epoch:02d}-{val_iou:.4f}",
+        filename="Human-{epoch:02d}-{val_loss:.4f}",
         save_top_k=3,  # Save the top 3 best models
         save_last=True,
     )
 
-    train_loader, val_loader = get_loaders(
+    train_loader, val_loader = get_celeb_loaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         use_small_subset=None
@@ -61,14 +61,15 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="./logs")
+    parser.add_argument("--expname", type=str, default="LoRA_SAM")
     parser.add_argument("--linear", type=bool, default=True)
     parser.add_argument("--conv2d", type=bool, default=False)
     parser.add_argument("--convtrans2d", type=bool, default=False)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--scale", type=float, default=1)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=7e-4)
-    parser.add_argument("--num_epochs", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--num_epochs", type=int, default=8)
     parser.add_argument("--data_dir", type=str, default='../SAM_LoRA/data')
 
     args = parser.parse_args()

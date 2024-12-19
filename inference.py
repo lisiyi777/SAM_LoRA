@@ -8,6 +8,9 @@ from model import *
 import supervision as sv
 from segment_anything import sam_model_registry, SamAutomaticMaskGenerator, SamPredictor
 from collections import defaultdict
+from celeb_dataset import get_celeb_loaders
+import time
+from utils import *
 
 class InferSAM:
     def __init__(self, orig_path="sam_vit_b_01ec64.pth", tuned_path=None):
@@ -17,9 +20,9 @@ class InferSAM:
         self.orig_sam = MyFastSAM(orig_path, **kwargs).to(self.device)
         if tuned_path is not None:
             self.tuned_sam = MyFastSAM.load_from_checkpoint(tuned_path, **kwargs).to(self.device)
+            self.tuned_predictor = SamPredictor(self.tuned_sam.lora_sam)
 
         self.orig_predictor = SamPredictor(self.orig_sam.lora_sam)
-        self.tuned_predictor = SamPredictor(self.tuned_sam.lora_sam)
 
     def inference_one(self, img, target, coords=None, labels=None, bboxes=None, tuned=True):
         if tuned:
@@ -48,17 +51,13 @@ class InferSAM:
         # sample masks
         if bboxes is not None:
             tgt_masks = self.tuned_sam.box_sample(target, bboxes)
-            # pred_masks = self.tuned_sam.box_sample(pred_masks, bboxes)
         else:
             tgt_masks = self.tuned_sam.point_sample(target, coords, labels)
-            # pred_masks = self.tuned_sam.point_sample(pred_masks, coords, labels)
 
         pred_masks = torch.from_numpy(pred_masks)        
 
-        # calculate iou
         ious = self.calc_IoU(pred_masks, tgt_masks)
 
-        # plot
         self.__plot(img, ious, pred_masks, tgt_masks, coords, labels, bboxes)
 
 
@@ -67,11 +66,6 @@ class InferSAM:
         # img = img.cpu().permute(1, 2, 0)
         masks = masks.cpu()
         gt_masks = gt_masks.cpu()
-        # if labels is not None:
-        #     labels = labels.cpu()
-        #     coords = coords.cpu()
-        # if bboxes is not None:
-        #     bboxes = bboxes.cpu()
 
         for i, (score, mask, gt_mask) in enumerate(zip(ious, masks, gt_masks)):
             ax = plt.subplot(3, 3, i + 1)
@@ -105,27 +99,6 @@ class InferSAM:
 
         plt.tight_layout()
         plt.show()
-
-    def calc_IoU(self, pred, target):
-        # # pred = torch.from_numpy(pred).to(target.device).bool()
-        # pred = pred.to(target.device).bool()
-        # target = target.bool()
-
-        # intersections = torch.sum(pred & target, dim=(1, 2))
-        # unions = torch.sum(pred | target, dim=(1, 2))        
-        # epsilon = 1e-7
-        # ious = intersections.float() / (unions.float() + epsilon)        
-        # return ious
-        
-        # pred = torch.from_numpy(pred).to(target.device).bool()
-        pred = pred.to(target.device).bool()
-        target = target.bool()
-
-        intersections = torch.sum(pred & target, dim=(1, 2))
-        unions = torch.sum(pred | target, dim=(1, 2))        
-        epsilon = 1e-7
-        ious = intersections.float() / (unions.float() + epsilon)        
-        return ious
 
     def inference_all(self, image):
         image_bgr = image[[2, 1, 0], :, :]
@@ -186,13 +159,12 @@ def GetData(high_res=False):
     return dataset
 
 def inference_with_points(infer:InferSAM, high_res=False, tuned=True):
-    # TODO: high res
     # input_point = np.array([[500,200],[300,200]])
     # input_label = np.array([0,1])
 
     dataset = GetData(high_res)
 
-    image, target = dataset.__getitem__(55)
+    image, target = dataset.__getitem__(65)
     print("Expect 160,256: ", image.shape)
     print("Expect 160,256: ", target.shape)
 
@@ -200,7 +172,7 @@ def inference_with_points(infer:InferSAM, high_res=False, tuned=True):
     # input_point = torch.tensor([[100,75],[150,75]])
     # input_label = torch.tensor([0,1])
     # input_box = torch.tensor([40, 50, 130, 110])
-    input_point = np.array([[100,75],[150,75]])
+    input_point = np.array([[50,30],[150,75]])
     input_label = np.array([1,1])
     input_box = np.array([40, 50, 130, 110])
     kwargs["coords"] = input_point
@@ -210,7 +182,7 @@ def inference_with_points(infer:InferSAM, high_res=False, tuned=True):
     
     infer.inference_one(image, target, **kwargs)
 
-def inference_all(infer:InferSAM, high_res=False):
+def sam_inference_all(infer:InferSAM, high_res=False):
     if high_res:
         input_transform = transforms.Compose([
         transforms.Resize((800, 1280), antialias=True),
@@ -233,7 +205,7 @@ def inference_all(infer:InferSAM, high_res=False):
         ])
     
     dataset = SA1B_Dataset("./data", transform=input_transform, target_transform=target_transform)
-    image, target = dataset.__getitem__(122)
+    image, target = dataset.__getitem__(88)
     image = TF.resize(image, size=[160, 256])
     target = TF.resize(target, size=[160, 256], interpolation=TF.InterpolationMode.NEAREST)
     if high_res:
@@ -249,32 +221,16 @@ def save_fig(fig, save_dir, batch_idx):
     fig.savefig(save_path)
     print(f"Figure saved at {save_path}")
 
-def show_mask(mask, ax, random_color=False):
-    if random_color:
-        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
-    else:
-        color = np.array([30/255, 144/255, 255/255, 0.6])
-    h, w = mask.shape
-    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-    ax.imshow(mask_image)
-    
-def show_points(coords, labels, ax, marker_size=350):
-    pos_points = coords[labels==1]
-    neg_points = coords[labels==0]
-    ax.scatter(pos_points[0, 0], pos_points[0, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
-    # ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
-    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)   
-    
-def show_box(box, ax):
-    x0, y0 = box[0], box[1]
-    w, h = box[2] - box[0], box[3] - box[1]
-    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2)) 
 
 def inference_all(infer: InferSAM, val_loader):
+    # model = infer.orig_sam
     model = infer.tuned_sam
     device = infer.device
     save_dir = "./output_plots"
     model.eval()
+    total_time = 0.0
+    total_masks = 0
+    
     with torch.no_grad():
         ious = torch.tensor([], device=device)
         for batch_idx, (image, target) in tqdm(enumerate(val_loader)):
@@ -283,7 +239,16 @@ def inference_all(infer: InferSAM, val_loader):
             batched_input = model.construct_inference_input_all(image, target)
             target = torch.stack(target, dim=0)
             h, w = target.shape[-2:]
+
+            start_time = time.time()
+            
             predictions = model.forward(batched_input, multimask_output=False)
+            
+            end_time = time.time()
+            batch_time = end_time - start_time
+            total_time += batch_time
+            num_masks = sum([len(p["masks"]) for p in predictions])
+            total_masks += num_masks
 
             pred_mask = [p["masks"].squeeze(1) for p in predictions]         
             for p, t in zip(pred_mask, target):
@@ -293,7 +258,6 @@ def inference_all(infer: InferSAM, val_loader):
         
             masks = [pred_mask[0].cpu().numpy(), target[0].cpu().numpy()]
             image_cpu = batched_input[0]["image"].cpu().permute(1, 2, 0)
-            box_cpu = batched_input[0]["boxes"].cpu()
             # print(ious.shape)
 
             fig, axes = plt.subplots(1, 2, figsize=(12, 6))
@@ -303,12 +267,12 @@ def inference_all(infer: InferSAM, val_loader):
                 axis.imshow(image_cpu/255.)
                 for m in mask:
                     show_mask(m, axis, random_color=True)
-                # for b in box_cpu:
-                #     show_box(b, axis)
                 axis.set_title(f"mean IoU: {ious.mean().item():.4f}")
             
             save_fig(fig, save_dir, batch_idx)
 
+        avg_time_per_mask = total_time / total_masks
+        print(f"Average Annotation Time per Mask: {avg_time_per_mask:.4f}s")
         mean_ious = ious.mean()
         print(f"TEST mIoU {mean_ious.item()}")
 
@@ -371,7 +335,6 @@ def split_masks_by_size(infer: InferSAM, val_loader):
             save_fig(fig, save_dir, f"batch_{batch_idx}.png")
             plt.close(fig)
 
-    # Calculate and log mean IoU for each size category
     for size, iou_list in iou_results.items():
         mean_iou = sum(iou_list) / len(iou_list) if iou_list else 0
         print(f"Mean IoU for {size}: {mean_iou:.4f}")
@@ -383,15 +346,16 @@ def split_masks_by_size(infer: InferSAM, val_loader):
 
 if __name__ == "__main__":
     orig_path = ".\checkpoints\sam_vit_b_01ec64.pth"
-    tuned_path = ".\checkpoints\MyFastSAM-epoch=06-val_loss=30.8608.ckpt"
+    # tuned_path = ".\checkpoints\Linear-epoch=00-val_iou=0.7465.ckpt"
+    tuned_path = ".\checkpoints\MyFastSAM-epoch=00-val_loss=59.4682.ckpt"
     infer = InferSAM(orig_path, tuned_path)
     train_loader, val_loader = get_loaders(
         data_dir="./data",
         batch_size=1,
-        use_small_subset=30
+        use_small_subset=80
     )
 
     # inference_with_points(infer, high_res=False, tuned=True)
+    # sam_inference_all(infer)
     inference_all(infer, val_loader)
-    split_masks_by_size(infer, val_loader)
-
+    # split_masks_by_size(infer, val_loader)

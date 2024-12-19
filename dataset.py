@@ -21,7 +21,6 @@ class SA1B_Dataset(torchvision.datasets.ImageFolder):
         if preprocess_idx is not None:
             self.__preprocess(start_index=preprocess_idx)
 
-        # Use glob.glob to get a list of all files matching the pattern
         self.tgt_files = glob.glob(os.path.join(self.ws, '*.pt'))
         self.tgt_files.sort()
 
@@ -32,10 +31,8 @@ class SA1B_Dataset(torchvision.datasets.ImageFolder):
 
 
     def __preprocess(self, start_index=0):
-        # os.mkdir(self.ws)
         for file, _ in tqdm(self.imgs[start_index:]):
-        # for file, _ in tqdm(self.imgs[:]):
-            masks = json.load(open(f'{file[:-3]}json'))['annotations'] # load json masks
+            masks = json.load(open(f'{file[:-3]}json'))['annotations']
 
             target = []
             for m in masks:
@@ -54,12 +51,6 @@ class SA1B_Dataset(torchvision.datasets.ImageFolder):
             torch.save(target, tgt_file)
     
     def __getitem__(self, index):
-        """
-        Args:
-            index (int): Index
-        Returns:
-            tuple: (sample, target) where target is class_index of the target class.
-        """
         path = self.img_files[index]
         image = self.loader(path)
         masks = torch.load(self.tgt_files[index])
@@ -70,7 +61,6 @@ class SA1B_Dataset(torchvision.datasets.ImageFolder):
 
         return image, masks
     
-
     def __len__(self):
         return len(self.tgt_files)
     
@@ -99,6 +89,7 @@ def get_loaders(data_dir="..\..\SAM_LoRA\data", batch_size=8, preprocess_idx=Non
     print("dataset size:\t", len(dataset))
     full_size = len(dataset)
     train_size = int(full_size * 0.8)
+    # train_size=1
     test_size = full_size - train_size
 
     torch.random.manual_seed(1)
