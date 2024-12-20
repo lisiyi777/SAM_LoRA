@@ -220,19 +220,3 @@ class MonkeyPatchLoRAConvTranspose2D(nn.Module):
     @property
     def bias(self):
         return self.convtrans2d.bias
-    
-def replace_LoRA(model:nn.Module, cls):
-    for name, block in model.named_children():
-        # patch every nn.Linear in Mlp
-        if isinstance(block, nn.Linear) and cls == MonkeyPatchLoRALinear:
-            block = cls(block, 4, 1)
-            setattr(model, name, block)
-        
-        elif isinstance(block, nn.Conv2d) and cls == MonkeyPatchLoRAConv2D:
-            min_channel = min(block.in_channels, block.out_channels)
-            if min_channel > 4:
-                block = cls(block, 4, 1)
-                setattr(model, name, block)
-                    
-        else:
-            replace_LoRA(block, cls)

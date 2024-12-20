@@ -54,18 +54,11 @@ class MyFastSAM(pl.LightningModule):
         lora_sam = deepcopy(orig_sam)
         BaseFinetuning.freeze(lora_sam, train_bn=True)
 
-        # self.inject_lora(lora_sam, MonkeyPatchLoRALinear, **kwargs)
-        # self.inject_lora(lora_sam, MonkeyPatchLoRAConv2D, **kwargs)
-        replace_LoRA(lora_sam, MonkeyPatchLoRALinear)
-        # replace_LoRA(lora_sam, MonkeyPatchLoRAConv2D)
-        # if self.linear:
-        #     replace_LoRA(lora_sam.mask_decoder, MonkeyPatchLoRALinear)
-        # if self.conv2d:
-        #     replace_LoRA(lora_sam, MonkeyPatchLoRAConv2D)
-
+        self.inject_lora(lora_sam, **kwargs)
         self.check_lora_sam(lora_sam)
 
         return lora_sam
+
 
     def check_lora_sam(self, model, print_all=False):
         if print_all:
@@ -314,31 +307,25 @@ class MyFastSAM(pl.LightningModule):
             focal_loss += mask_focal_loss(pred, target)
         return dice_loss, focal_loss
 
-
-    def inject_lora(self, model, layer_class, **kwargs):
+    def inject_lora(self, model, **kwargs):
         rank = kwargs.get("rank", 4)
         scale = kwargs.get("scale", 1)
         for name, block in model.named_children():  
-            if isinstance(block, nn.Linear) and layer_class==MonkeyPatchLoRALinear:
-            # patch every nn.Linear in the model
-                block = MonkeyPatchLoRALinear(block, rank, scale)
-                setattr(model, name, block)
+            if isinstance(block, nn.Linear):
+               if kwargs.get("linear"):
+                    block = MonkeyPatchLoRALinear(block, rank, scale)
+                    setattr(model, name, block)
 
-            # patch every nn.Conv2d in the model
-            elif isinstance(block, nn.Conv2d) and layer_class==MonkeyPatchLoRAConv2D:
-                block = MonkeyPatchLoRAConv2D(block, rank, scale)
-                setattr(model, name, block)
+            elif isinstance(block, nn.Conv2d):
+                if kwargs.get("conv2d"):
+                    if min(block.in_channels, block.out_channels) > 4:
+                        block = MonkeyPatchLoRAConv2D(block, rank, scale)
+                        setattr(model, name, block)
 
-            # patch every nn.ConvTranspose2d in the model
-            elif isinstance(block, nn.ConvTranspose2d) and layer_class==MonkeyPatchLoRAConvTranspose2D:
-                block = MonkeyPatchLoRAConvTranspose2D(block, rank, scale)
-                setattr(model, name, block)
-
-            #iterates over the immediate children of the model (not recursively)
-            else:
-                self.inject_lora(block, layer_class, **kwargs)
+            elif isinstance(block, nn.Module):
+                self.inject_lora(block, **kwargs)
         return model
-
+    
     def point_sample(self,all_masks, points_coords, points_label):
         # all_masks: [N, H, W], one image, N masks
         # points_coords: (N, 2)

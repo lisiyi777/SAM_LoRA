@@ -62,7 +62,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="./logs")
     parser.add_argument("--linear", type=bool, default=True)
-    parser.add_argument("--conv2d", type=bool, default=False)
+    parser.add_argument("--conv2d", type=bool, default=True)
     parser.add_argument("--convtrans2d", type=bool, default=False)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--scale", type=float, default=1)
